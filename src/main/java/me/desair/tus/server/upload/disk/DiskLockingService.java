@@ -13,6 +13,8 @@ import me.desair.tus.server.upload.UploadIdFactory;
 import me.desair.tus.server.upload.UploadLock;
 import me.desair.tus.server.upload.UploadLockingService;
 import org.apache.commons.lang3.Validate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * {@link UploadLockingService} implementation that uses the file system for implementing locking
@@ -24,9 +26,20 @@ import org.apache.commons.lang3.Validate;
  */
 public class DiskLockingService extends AbstractDiskBasedService implements UploadLockingService {
 
+  private static final Logger log = LoggerFactory.getLogger(DiskLockingService.class);
+
   private static final String LOCK_SUB_DIRECTORY = "locks";
 
   private UploadIdFactory idFactory;
+
+  /** Number of retry attempts when lock acquisition fails. Default is 0 (no retry). */
+  private int lockRetryCount = 0;
+
+  /** Initial retry interval in milliseconds. Default is 50ms. */
+  private long lockRetryIntervalMs = 50;
+
+  /** Maximum retry interval in milliseconds (for exponential backoff). Default is 500ms. */
+  private long lockRetryMaxIntervalMs = 500;
 
   public DiskLockingService(String storagePath) {
     super(storagePath + File.separator + LOCK_SUB_DIRECTORY);
@@ -39,19 +52,91 @@ public class DiskLockingService extends AbstractDiskBasedService implements Uplo
     this.idFactory = idFactory;
   }
 
+  /**
+   * Constructor with lock retry configuration.
+   *
+   * <p>When a DELETE request is sent while a PATCH request is still in progress, the lock may not
+   * be released yet. This constructor allows configuring retry behavior to handle such cases.
+   *
+   * @param storagePath The path where lock files are stored
+   * @param lockRetryCount Number of retry attempts (0 means no retry)
+   * @param lockRetryIntervalMs Initial retry interval in milliseconds
+   * @param lockRetryMaxIntervalMs Maximum retry interval for exponential backoff
+   */
+  public DiskLockingService(
+      String storagePath, int lockRetryCount, long lockRetryIntervalMs, long lockRetryMaxIntervalMs) {
+    this(storagePath);
+    this.lockRetryCount = lockRetryCount;
+    this.lockRetryIntervalMs = lockRetryIntervalMs;
+    this.lockRetryMaxIntervalMs = lockRetryMaxIntervalMs;
+  }
+
+  /**
+   * Constructor with lock retry configuration and custom UploadIdFactory.
+   *
+   * @param idFactory The UploadIdFactory to use
+   * @param storagePath The path where lock files are stored
+   * @param lockRetryCount Number of retry attempts (0 means no retry)
+   * @param lockRetryIntervalMs Initial retry interval in milliseconds
+   * @param lockRetryMaxIntervalMs Maximum retry interval for exponential backoff
+   */
+  public DiskLockingService(
+      UploadIdFactory idFactory,
+      String storagePath,
+      int lockRetryCount,
+      long lockRetryIntervalMs,
+      long lockRetryMaxIntervalMs) {
+    this(storagePath, lockRetryCount, lockRetryIntervalMs, lockRetryMaxIntervalMs);
+    Validate.notNull(idFactory, "The IdFactory cannot be null");
+    this.idFactory = idFactory;
+  }
+
   @Override
   public UploadLock lockUploadByUri(String requestUri) throws TusException, IOException {
 
     UploadId id = idFactory.readUploadId(requestUri);
 
-    UploadLock lock = null;
-
     Path lockPath = getLockPath(id);
-    // If lockPath is not null, we know this is a valid Upload URI
-    if (lockPath != null) {
-      lock = new FileBasedLock(requestUri, lockPath);
+    // If lockPath is null, this is not a valid Upload URI
+    if (lockPath == null) {
+      return null;
     }
-    return lock;
+
+    // Try to acquire lock with optional retry
+    UploadAlreadyLockedException lastException = null;
+    long currentInterval = lockRetryIntervalMs;
+
+    for (int attempt = 0; attempt <= lockRetryCount; attempt++) {
+      try {
+        return new FileBasedLock(requestUri, lockPath);
+      } catch (UploadAlreadyLockedException e) {
+        lastException = e;
+        if (attempt < lockRetryCount) {
+          log.info(
+              "Lock acquisition failed, retrying in {}ms ({}/{}): {}",
+              currentInterval,
+              attempt + 1,
+              lockRetryCount,
+              requestUri);
+          try {
+            Thread.sleep(currentInterval);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw e;
+          }
+          // Exponential backoff with max interval
+          currentInterval = Math.min(currentInterval * 2, lockRetryMaxIntervalMs);
+        }
+      }
+    }
+
+    if (lastException != null) {
+      log.warn(
+          "Lock acquisition failed after {} retries: {}", lockRetryCount, requestUri);
+      throw lastException;
+    }
+
+    return null;
   }
 
   @Override

@@ -163,4 +163,32 @@ public class DiskLockingServiceTest {
     // Cleanup
     FileUtils.deleteDirectory(nonExistentPath.toFile());
   }
+
+  @Test
+  public void lockWithRetrySuccess() throws Exception {
+    // Create a locking service with retry enabled
+    DiskLockingService retryLockingService =
+        new DiskLockingService(idFactory, storagePath.toString(), 3, 50, 500);
+
+    // First lock should succeed immediately
+    UploadLock lock1 =
+        retryLockingService.lockUploadByUri("/upload/test/000003f1-a850-49de-af03-997272d834c9");
+    assertThat(lock1, not(nullValue()));
+
+    lock1.release();
+  }
+
+  @Test
+  public void lockWithRetryConstructor() throws Exception {
+    // Test the constructor with retry parameters (without idFactory)
+    DiskLockingService retryLockingService =
+        new DiskLockingService(storagePath.toString(), 5, 100, 1000);
+    retryLockingService.setIdFactory(idFactory);
+
+    UploadLock lock =
+        retryLockingService.lockUploadByUri("/upload/test/000003f1-a850-49de-af03-997272d834c9");
+    assertThat(lock, not(nullValue()));
+
+    lock.release();
+  }
 }
