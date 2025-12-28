@@ -1,6 +1,34 @@
 [![Build and Tests](https://github.com/tomdesair/tus-java-server/actions/workflows/build.yml/badge.svg)](https://github.com/tomdesair/tus-java-server/actions?query=branch%3Amaster+) [![Coverage Status](https://coveralls.io/repos/github/tomdesair/tus-java-server/badge.svg?branch=master)](https://coveralls.io/github/tomdesair/tus-java-server?branch=master) [![Bugs](https://sonarcloud.io/api/project_badges/measure?project=me.desair.tus%3Atus-java-server&metric=bugs)](https://sonarcloud.io/dashboard?id=me.desair.tus%3Atus-java-server) [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=me.desair.tus%3Atus-java-server&metric=vulnerabilities)](https://sonarcloud.io/dashboard?id=me.desair.tus%3Atus-java-server) [![Duplicated Lines](https://sonarcloud.io/api/project_badges/measure?project=me.desair.tus%3Atus-java-server&metric=duplicated_lines_density)](https://sonarcloud.io/dashboard?id=me.desair.tus%3Atus-java-server)
 
 # tus-java-server
+
+This is a fork of [tus-java-server](https://github.com/tomdesair/tus-java-server) with the following enhancements:
+
+1. **Issue #39 fix**: Ensure storage directory exists before cleanup operations
+2. **Issue #34 fix**: Handle corrupted upload info files gracefully
+3. **Lock retry mechanism**: Configurable retry for lock acquisition to handle DELETE/PATCH race conditions
+
+## Usage with JitPack
+
+Add to your `pom.xml`:
+
+```xml
+<repositories>
+    <repository>
+        <id>jitpack.io</id>
+        <url>https://jitpack.io</url>
+    </repository>
+</repositories>
+
+<dependency>
+    <groupId>com.github.YOUR_USERNAME</groupId>
+    <artifactId>tus-java-server</artifactId>
+    <version>TAG_VERSION</version>
+</dependency>
+```
+
+---
+
 This library can be used to enable resumable (and potentially asynchronous) file uploads in any Java web application. This allows the users of your application to upload large files over slow and unreliable internet connections. The ability to pause or resume a file upload (after a connection loss or reset) is achieved by implementing the open file upload protocol tus (https://tus.io/). This library implements the server-side of the tus v1.0.0 protocol with [all optional extensions](#tus-protocol-extensions).
 
 The Javadoc of this library can be found at https://tus.desair.me/. As of version 1.0.0-3.0, this library requires Java 17+. For older Java versions, please use one of the `1.0.0-2.x` releases.
