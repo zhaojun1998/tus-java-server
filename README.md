@@ -7,6 +7,7 @@ This is a fork of [tus-java-server](https://github.com/tomdesair/tus-java-server
 1. **Issue #39 fix**: Ensure storage directory exists before cleanup operations
 2. **Issue #34 fix**: Handle corrupted upload info files gracefully
 3. **Lock retry mechanism**: Configurable retry for lock acquisition to handle DELETE/PATCH race conditions
+4. **Security fixes**: Updated dependencies to fix CVE-2024-47554 (commons-io), CVE-2025-48924 (commons-lang3), CVE-2024-38816 (Spring Framework)
 
 ## Usage with JitPack
 
@@ -21,7 +22,7 @@ Add to your `pom.xml`:
 </repositories>
 
 <dependency>
-    <groupId>com.github.YOUR_USERNAME</groupId>
+    <groupId>com.github.zhaojun1998</groupId>
     <artifactId>tus-java-server</artifactId>
     <version>TAG_VERSION</version>
 </dependency>
@@ -42,7 +43,7 @@ You can add the latest stable version of this library to your application using 
     <dependency>
       <groupId>me.desair.tus</groupId>
       <artifactId>tus-java-server</artifactId>
-      <version>1.0.0-3.0-SNAPSHOT</version>
+      <version>1.0.0-3.2</version>
     </dependency>
 
 The main entry point of the library is the `me.desair.tus.server.TusFileUploadService.process(jakarta.servlet.http.HttpServletRequest, jakarta.servlet.http.HttpServletResponse)` method. You can call this method inside a `jakarta.servlet.http.HttpServlet`, a `jakarta.servlet.Filter` or any REST API controller of a framework that gives you access to `HttpServletRequest` and `HttpServletResponse` objects. In the following list, you can find some example implementations:
