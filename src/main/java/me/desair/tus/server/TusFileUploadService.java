@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Duration;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -18,6 +19,7 @@ import me.desair.tus.server.creation.CreationExtension;
 import me.desair.tus.server.creationwithupload.CreationWithUploadExtension;
 import me.desair.tus.server.download.DownloadExtension;
 import me.desair.tus.server.exception.TusException;
+import me.desair.tus.server.exception.UploadAlreadyLockedException;
 import me.desair.tus.server.expiration.ExpirationExtension;
 import me.desair.tus.server.termination.TerminationExtension;
 import me.desair.tus.server.upload.UploadIdFactory;
@@ -44,6 +46,7 @@ public class TusFileUploadService {
   public static final String TUS_API_VERSION = "1.0.0";
 
   private static final Logger log = LoggerFactory.getLogger(TusFileUploadService.class);
+  private static final long LOCK_RETRY_INTERVAL_MS = 200L;
 
   private UploadStorageService uploadStorageService;
   private UploadLockingService uploadLockingService;
@@ -52,6 +55,7 @@ public class TusFileUploadService {
   private final Set<HttpMethod> supportedHttpMethods = EnumSet.noneOf(HttpMethod.class);
   private boolean isThreadLocalCacheEnabled = false;
   private boolean isChunkedTransferDecodingEnabled = false;
+  private Duration uploadLockWaitTimeout = Duration.ZERO;
 
   /** Constructor. */
   public TusFileUploadService() {
@@ -199,6 +203,23 @@ public class TusFileUploadService {
    */
   public TusFileUploadService withChunkedTransferDecoding(boolean isEnabled) {
     isChunkedTransferDecodingEnabled = isEnabled;
+    return this;
+  }
+
+  /**
+   * Set how long {@link #getUploadInfo(String, String)}, {@link #getUploadedBytes(String, String)}
+   * and {@link #deleteUpload(String, String)} wait for an upload that is locked by a request before
+   * they throw {@link UploadAlreadyLockedException}. The default of zero fails immediately. Unlike
+   * HEAD and DELETE requests, these methods never interrupt the request that holds the lock, so a
+   * PATCH request that is still receiving data keeps the upload until it completes or times out.
+   *
+   * @param timeout The maximum time to wait for the upload lock, zero to fail immediately
+   * @return The current service
+   */
+  public TusFileUploadService withUploadLockWaitTimeout(Duration timeout) {
+    Validate.notNull(timeout, "The upload lock wait timeout cannot be null");
+    Validate.isTrue(!timeout.isNegative(), "The upload lock wait timeout cannot be negative");
+    this.uploadLockWaitTimeout = timeout;
     return this;
   }
 
@@ -372,6 +393,15 @@ public class TusFileUploadService {
 
       processLockedRequest(method, request, response, ownerKey);
 
+    } catch (UploadAlreadyLockedException e) {
+      // Another request still holds the upload, for example a PATCH request that a client gave up
+      // on and is now resuming; the client retries after the 423 response
+      log.warn(
+          "Upload of request {} {} is locked by another request. Sent response status {}",
+          method,
+          request.getRequestURI(),
+          e.getStatus());
+      response.sendError(e.getStatus(), e.getMessage());
     } catch (TusException e) {
       log.error("Unable to lock upload for request URI " + request.getRequestURI(), e);
       response.sendError(e.getStatus(), e.getMessage());
@@ -391,7 +421,7 @@ public class TusFileUploadService {
           uploadLockingService.requestLockRelease(requestUri);
           retries++;
           try {
-            Thread.sleep(200L);
+            Thread.sleep(LOCK_RETRY_INTERVAL_MS);
           } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new IOException("Lock acquisition retry interrupted", ie);
@@ -405,6 +435,29 @@ public class TusFileUploadService {
       lock = uploadLockingService.lockUploadByUri(requestUri);
     }
     return lock;
+  }
+
+  private UploadLock lockUploadWithinTimeout(String uploadUri) throws TusException, IOException {
+    long deadline = System.nanoTime() + uploadLockWaitTimeout.toNanos();
+    while (true) {
+      try {
+        return uploadLockingService.lockUploadByUri(uploadUri);
+      } catch (UploadAlreadyLockedException e) {
+        long remainingNanos = deadline - System.nanoTime();
+        if (remainingNanos <= 0) {
+          throw e;
+        }
+        try {
+          // Rounds up so the last attempt happens after the deadline, not just before it
+          Thread.sleep(
+              Math.min(LOCK_RETRY_INTERVAL_MS, Duration.ofNanos(remainingNanos).toMillis() + 1));
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+          throw new IOException(
+              "Waiting for the lock of upload " + uploadUri + " was interrupted", ie);
+        }
+      }
+    }
   }
 
   /**
@@ -431,7 +484,7 @@ public class TusFileUploadService {
   public InputStream getUploadedBytes(String uploadUri, String ownerKey)
       throws IOException, TusException {
 
-    try (UploadLock lock = uploadLockingService.lockUploadByUri(uploadUri)) {
+    try (UploadLock lock = lockUploadWithinTimeout(uploadUri)) {
 
       return uploadStorageService.getUploadedBytes(uploadUri, ownerKey);
     }
@@ -460,7 +513,7 @@ public class TusFileUploadService {
    */
   public UploadInfo getUploadInfo(String uploadUri, String ownerKey)
       throws IOException, TusException {
-    try (UploadLock lock = uploadLockingService.lockUploadByUri(uploadUri)) {
+    try (UploadLock lock = lockUploadWithinTimeout(uploadUri)) {
 
       return uploadStorageService.getUploadInfo(uploadUri, ownerKey);
     }
@@ -484,7 +537,7 @@ public class TusFileUploadService {
    * @param ownerKey The key of the owner of this upload
    */
   public void deleteUpload(String uploadUri, String ownerKey) throws IOException, TusException {
-    try (UploadLock lock = uploadLockingService.lockUploadByUri(uploadUri)) {
+    try (UploadLock lock = lockUploadWithinTimeout(uploadUri)) {
       UploadInfo uploadInfo = uploadStorageService.getUploadInfo(uploadUri, ownerKey);
       if (uploadInfo != null) {
         uploadStorageService.terminateUpload(uploadInfo);

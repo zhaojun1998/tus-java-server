@@ -1,10 +1,13 @@
 package me.desair.tus.server;
 
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.*;
 
 import java.io.IOException;
+import java.time.Duration;
 import me.desair.tus.server.exception.UploadAlreadyLockedException;
 import me.desair.tus.server.upload.UploadLock;
 import me.desair.tus.server.upload.UploadLockingService;
@@ -191,5 +194,93 @@ public class TusFileUploadServiceTest {
 
     verify(storageService).setUploadDataSyncEnabled(false);
     verify(storageService).setCompletedUploadExpirationEnabled(true);
+  }
+
+  @Test
+  public void testUploadAccessFailsImmediatelyWhenLockedByDefault() throws Exception {
+    UploadLockingService lockingService = mock(UploadLockingService.class);
+    when(lockingService.lockUploadByUri("/files/test"))
+        .thenThrow(new UploadAlreadyLockedException("Locked"));
+    TusFileUploadService service =
+        new TusFileUploadService()
+            .withUploadStorageService(mock(UploadStorageService.class))
+            .withUploadLockingService(lockingService);
+
+    assertThrows(
+        UploadAlreadyLockedException.class, () -> service.getUploadInfo("/files/test", "owner"));
+    verify(lockingService, times(1)).lockUploadByUri("/files/test");
+  }
+
+  @Test
+  public void testUploadAccessWaitsForLockWithoutInterruptingTheHolder() throws Exception {
+    UploadLockingService lockingService = mock(UploadLockingService.class);
+    UploadLock lock = mock(UploadLock.class);
+    UploadAlreadyLockedException locked = new UploadAlreadyLockedException("Locked");
+    when(lockingService.lockUploadByUri("/files/test"))
+        .thenThrow(locked)
+        .thenReturn(lock)
+        .thenThrow(locked)
+        .thenReturn(lock)
+        .thenThrow(locked)
+        .thenReturn(lock);
+    TusFileUploadService service =
+        new TusFileUploadService()
+            .withUploadStorageService(mock(UploadStorageService.class))
+            .withUploadLockingService(lockingService)
+            .withUploadLockWaitTimeout(Duration.ofSeconds(5));
+
+    service.getUploadInfo("/files/test", "owner");
+    service.getUploadedBytes("/files/test", "owner");
+    service.deleteUpload("/files/test", "owner");
+
+    verify(lock, times(3)).close();
+    verify(lockingService, never()).requestLockRelease(anyString());
+  }
+
+  @Test
+  public void testUploadAccessFailsWhenLockWaitTimeoutExpires() throws Exception {
+    UploadLockingService lockingService = mock(UploadLockingService.class);
+    when(lockingService.lockUploadByUri("/files/test"))
+        .thenThrow(new UploadAlreadyLockedException("Locked"));
+    TusFileUploadService service =
+        new TusFileUploadService()
+            .withUploadStorageService(mock(UploadStorageService.class))
+            .withUploadLockingService(lockingService)
+            .withUploadLockWaitTimeout(Duration.ofMillis(500));
+
+    long start = System.nanoTime();
+    assertThrows(
+        UploadAlreadyLockedException.class, () -> service.deleteUpload("/files/test", "owner"));
+
+    assertTrue(Duration.ofNanos(System.nanoTime() - start).toMillis() >= 500);
+  }
+
+  @Test
+  public void testUploadLockWaitInterrupted() throws Exception {
+    UploadLockingService lockingService = mock(UploadLockingService.class);
+    when(lockingService.lockUploadByUri("/files/test"))
+        .thenThrow(new UploadAlreadyLockedException("Locked"));
+    TusFileUploadService service =
+        new TusFileUploadService()
+            .withUploadStorageService(mock(UploadStorageService.class))
+            .withUploadLockingService(lockingService)
+            .withUploadLockWaitTimeout(Duration.ofSeconds(5));
+
+    Thread.currentThread().interrupt();
+    try {
+      assertThrows(IOException.class, () -> service.getUploadInfo("/files/test", "owner"));
+    } finally {
+      // Clears the flag so it does not leak into other tests
+      assertTrue(Thread.interrupted());
+    }
+  }
+
+  @Test
+  public void testNegativeUploadLockWaitTimeoutIsRejected() {
+    TusFileUploadService service = new TusFileUploadService();
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> service.withUploadLockWaitTimeout(Duration.ofMillis(-1)));
   }
 }
