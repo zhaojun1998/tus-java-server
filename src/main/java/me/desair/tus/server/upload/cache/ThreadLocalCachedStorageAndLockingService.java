@@ -175,6 +175,16 @@ public class ThreadLocalCachedStorageAndLockingService
   }
 
   @Override
+  public void setCompletedUploadExpirationEnabled(boolean enabled) {
+    storageServiceDelegate.setCompletedUploadExpirationEnabled(enabled);
+  }
+
+  @Override
+  public boolean isCompletedUploadExpirationEnabled() {
+    return storageServiceDelegate.isCompletedUploadExpirationEnabled();
+  }
+
+  @Override
   public void setUploadDataSyncEnabled(boolean enabled) {
     storageServiceDelegate.setUploadDataSyncEnabled(enabled);
   }
@@ -204,6 +214,12 @@ public class ThreadLocalCachedStorageAndLockingService
   public UploadLock lockUploadByUri(String requestUri) throws TusException, IOException {
     UploadLock uploadLock = lockingServiceDelegate.lockUploadByUri(requestUri);
     return new CachedLock(uploadLock);
+  }
+
+  @Override
+  public UploadLock lockUpload(UploadId id) throws TusException, IOException {
+    UploadLock uploadLock = lockingServiceDelegate.lockUpload(id);
+    return uploadLock == null ? null : new CachedLock(uploadLock);
   }
 
   @Override

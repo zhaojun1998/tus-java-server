@@ -7,7 +7,10 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.FileTime;
 import java.text.ParseException;
 import java.util.UUID;
 import me.desair.tus.server.upload.UploadId;
@@ -15,7 +18,9 @@ import me.desair.tus.server.upload.UploadInfo;
 import me.desair.tus.server.upload.UploadLockingService;
 import org.apache.commons.lang3.time.DateFormatUtils;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -26,6 +31,8 @@ public class ExpiredUploadFilterTest {
   @Mock private DiskStorageService diskStorageService;
 
   @Mock private UploadLockingService uploadLockingService;
+
+  @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   private ExpiredUploadFilter uploadFilter;
 
@@ -72,6 +79,40 @@ public class ExpiredUploadFilterTest {
   }
 
   @Test
+  public void acceptCompletedUploadWhenCompletedUploadExpirationIsEnabled() throws Exception {
+    UploadInfo info = createExpiredUploadInfo();
+    info.setId(new UploadId(UUID.randomUUID()));
+    info.setOffset(10L);
+    info.setLength(10L);
+    info.updateExpiration(100L);
+
+    when(diskStorageService.getUploadInfo(eq(info.getId()))).thenReturn(info);
+    when(diskStorageService.isCompletedUploadExpirationEnabled()).thenReturn(true);
+    when(uploadLockingService.isLocked(eq(info.getId()))).thenReturn(false);
+
+    assertTrue(uploadFilter.accept(Paths.get(info.getId().toString())));
+  }
+
+  @Test
+  public void acceptDirectoryWithoutUploadInfoByLatestModification() throws Exception {
+    when(diskStorageService.getUploadExpirationPeriod()).thenReturn(60_000L);
+    Path upload = createUploadDirectoryModifiedBefore(120_000L);
+
+    assertTrue(uploadFilter.accept(upload));
+
+    Files.setLastModifiedTime(
+        upload.resolve("data"), FileTime.fromMillis(System.currentTimeMillis()));
+    assertFalse(uploadFilter.accept(upload));
+  }
+
+  @Test
+  public void acceptDirectoryWithoutUploadInfoWhenExpirationIsDisabled() throws Exception {
+    when(diskStorageService.getUploadExpirationPeriod()).thenReturn(0L);
+
+    assertFalse(uploadFilter.accept(createUploadDirectoryModifiedBefore(120_000L)));
+  }
+
+  @Test
   public void acceptInProgressButNotExpired() throws Exception {
     UploadInfo info = new UploadInfo();
     info.setId(new UploadId(UUID.randomUUID()));
@@ -111,6 +152,14 @@ public class ExpiredUploadFilterTest {
     when(uploadLockingService.isLocked(eq(info.getId()))).thenReturn(false);
 
     assertFalse(uploadFilter.accept(Paths.get(info.getId().toString())));
+  }
+
+  private Path createUploadDirectoryModifiedBefore(long age) throws IOException {
+    Path upload = temporaryFolder.newFolder(UUID.randomUUID().toString()).toPath();
+    FileTime modified = FileTime.fromMillis(System.currentTimeMillis() - age);
+    Files.setLastModifiedTime(Files.createFile(upload.resolve("data")), modified);
+    Files.setLastModifiedTime(upload, modified);
+    return upload;
   }
 
   private UploadInfo createExpiredUploadInfo() throws ParseException {

@@ -181,11 +181,15 @@ public class TusFileUploadServiceTest {
   }
 
   @Test
-  public void testUploadDataSyncSettingIsKeptWhenStorageServiceIsReplaced() {
+  public void testStorageSettingsAreKeptWhenStorageServiceIsReplaced() {
     UploadStorageService storageService = mock(UploadStorageService.class);
 
-    new TusFileUploadService().withUploadDataSync(false).withUploadStorageService(storageService);
+    new TusFileUploadService()
+        .withUploadDataSync(false)
+        .withCompletedUploadExpiration(true)
+        .withUploadStorageService(storageService);
 
     verify(storageService).setUploadDataSyncEnabled(false);
+    verify(storageService).setCompletedUploadExpirationEnabled(true);
   }
 }

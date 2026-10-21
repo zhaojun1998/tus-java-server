@@ -60,15 +60,22 @@ public class DiskLockingService extends AbstractDiskBasedService implements Uplo
    */
   @Override
   public UploadLock lockUploadByUri(String requestUri) throws TusException, IOException {
+    return lock(requestUri, idFactory.readUploadId(requestUri));
+  }
 
-    UploadId id = idFactory.readUploadId(requestUri);
+  @Override
+  public UploadLock lockUpload(UploadId id) throws TusException, IOException {
+    Objects.requireNonNull(id, "The upload ID cannot be null");
+    return lock(id.toString(), id);
+  }
 
+  private UploadLock lock(String uploadUri, UploadId id) throws TusException, IOException {
     UploadLock lock = null;
 
     Path lockPath = getLockPath(id);
     // If lockPath is not null, we know this is a valid Upload URI
     if (lockPath != null) {
-      FileBasedLock baseLock = new FileBasedLock(requestUri, lockPath);
+      FileBasedLock baseLock = new FileBasedLock(uploadUri, lockPath);
       Path stopFilePath = baseLock.getLockPath().resolveSibling(id.toString() + ".stop");
       lock = new RegisteredLock(baseLock, id.toString(), stopFilePath);
     }

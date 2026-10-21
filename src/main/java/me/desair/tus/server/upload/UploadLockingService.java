@@ -19,6 +19,19 @@ public interface UploadLockingService {
   UploadLock lockUploadByUri(String requestUri) throws TusException, IOException;
 
   /**
+   * Lock the upload with the given ID for maintenance work that is not triggered by a request, such
+   * as removing expired uploads. Callers that receive null fall back to {@link
+   * #isLocked(UploadId)}, which cannot keep a request from locking the upload right afterwards.
+   *
+   * @param id The ID of the upload to lock
+   * @return The lock on the upload, or null if this service cannot lock uploads by ID
+   * @throws TusException If the upload is already locked
+   */
+  default UploadLock lockUpload(UploadId id) throws TusException, IOException {
+    return null;
+  }
+
+  /**
    * Clean up any stale locks that are still present.
    *
    * @throws IOException When cleaning a stale lock fails

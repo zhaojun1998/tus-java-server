@@ -26,6 +26,7 @@ import me.desair.tus.server.exception.UploadNotFoundException;
 import me.desair.tus.server.upload.UploadId;
 import me.desair.tus.server.upload.UploadIdFactory;
 import me.desair.tus.server.upload.UploadInfo;
+import me.desair.tus.server.upload.UploadLock;
 import me.desair.tus.server.upload.UploadLockingService;
 import me.desair.tus.server.upload.UploadStorageService;
 import me.desair.tus.server.upload.UploadType;
@@ -52,6 +53,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   private UploadConcatenationService uploadConcatenationService;
   private boolean isUploadDeduplicationEnabled = false;
   private boolean isUploadDataSyncEnabled = true;
+  private boolean isCompletedUploadExpirationEnabled = false;
 
   public DiskStorageService(String storagePath) {
     super(storagePath + File.separator + UPLOAD_SUB_DIRECTORY);
@@ -78,6 +80,16 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   @Override
   public long getMaxUploadSize() {
     return maxUploadSize == null ? 0 : maxUploadSize;
+  }
+
+  @Override
+  public void setCompletedUploadExpirationEnabled(boolean enabled) {
+    this.isCompletedUploadExpirationEnabled = enabled;
+  }
+
+  @Override
+  public boolean isCompletedUploadExpirationEnabled() {
+    return isCompletedUploadExpirationEnabled;
   }
 
   @Override
@@ -459,13 +471,31 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
 
   @Override
   public void cleanupExpiredUploads(UploadLockingService uploadLockingService) throws IOException {
+    ExpiredUploadFilter expiredUploadFilter = new ExpiredUploadFilter(this, uploadLockingService);
     try (DirectoryStream<Path> expiredUploadsStream =
-        Files.newDirectoryStream(
-            getStoragePath(), new ExpiredUploadFilter(this, uploadLockingService))) {
+        Files.newDirectoryStream(getStoragePath(), expiredUploadFilter)) {
 
       for (Path path : expiredUploadsStream) {
+        deleteExpiredUpload(path, expiredUploadFilter, uploadLockingService);
+      }
+    }
+  }
+
+  /**
+   * Delete an expired upload while holding its lock. A request that resumed the upload after the
+   * filter accepted it has extended its expiration, so the upload is only deleted when it is still
+   * expired under the lock.
+   */
+  private void deleteExpiredUpload(
+      Path path, ExpiredUploadFilter expiredUploadFilter, UploadLockingService uploadLockingService)
+      throws IOException {
+    UploadId id = new UploadId(path.getFileName().toString());
+    try (UploadLock lock = uploadLockingService.lockUpload(id)) {
+      if (lock == null || expiredUploadFilter.isExpired(path, id)) {
         FileUtils.deleteDirectory(path.toFile());
       }
+    } catch (TusException e) {
+      log.debug("Upload {} is locked again, it will be checked on the next cleanup", id);
     }
   }
 

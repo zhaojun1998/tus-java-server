@@ -2,6 +2,7 @@ package me.desair.tus.server.upload.cache;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -140,6 +141,31 @@ public class ThreadLocalCachedStorageAndLockingServiceTest {
   }
 
   @Test
+  public void testLockUploadByIdAndClearCache() throws Exception {
+    UploadId id = new UploadId(UUID.randomUUID().toString());
+    UploadInfo info = new UploadInfo();
+    info.setId(id);
+    when(mockStorage.getUploadInfo(id)).thenReturn(info);
+
+    UploadLock mockLock = mock(UploadLock.class);
+    when(mockLocking.lockUpload(id)).thenReturn(mockLock);
+
+    service.getUploadInfo(id);
+
+    UploadLock lock = service.lockUpload(id);
+    lock.close();
+    verify(mockLock, times(1)).close();
+
+    service.getUploadInfo(id);
+    verify(mockStorage, times(2)).getUploadInfo(id);
+  }
+
+  @Test
+  public void testLockUploadByIdUnsupportedByDelegate() throws Exception {
+    assertNull(service.lockUpload(new UploadId(UUID.randomUUID().toString())));
+  }
+
+  @Test
   public void testDelegateMethods() throws Exception {
     UploadId id = new UploadId(UUID.randomUUID().toString());
     UploadInfo info = new UploadInfo();
@@ -191,6 +217,12 @@ public class ThreadLocalCachedStorageAndLockingServiceTest {
 
     service.isUploadDeduplicationEnabled();
     verify(mockStorage, times(1)).isUploadDeduplicationEnabled();
+
+    service.setCompletedUploadExpirationEnabled(true);
+    verify(mockStorage, times(1)).setCompletedUploadExpirationEnabled(true);
+
+    service.isCompletedUploadExpirationEnabled();
+    verify(mockStorage, times(1)).isCompletedUploadExpirationEnabled();
 
     service.setUploadDataSyncEnabled(false);
     verify(mockStorage, times(1)).setUploadDataSyncEnabled(false);

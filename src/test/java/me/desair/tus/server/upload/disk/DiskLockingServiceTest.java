@@ -5,6 +5,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.reset;
@@ -17,6 +18,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.FileTime;
 import java.util.UUID;
+import me.desair.tus.server.exception.UploadAlreadyLockedException;
 import me.desair.tus.server.upload.UploadId;
 import me.desair.tus.server.upload.UploadIdFactory;
 import me.desair.tus.server.upload.UploadLock;
@@ -87,6 +89,17 @@ public class DiskLockingServiceTest {
     assertThat(uploadLock, not(nullValue()));
 
     uploadLock.release();
+  }
+
+  @Test
+  public void lockUploadLocksTheUploadOfItsUri() throws Exception {
+    String id = UUID.randomUUID().toString();
+
+    try (UploadLock uploadLock = lockingService.lockUpload(new UploadId(id))) {
+      assertThrows(
+          UploadAlreadyLockedException.class,
+          () -> lockingService.lockUploadByUri("/upload/test/" + id));
+    }
   }
 
   @Test

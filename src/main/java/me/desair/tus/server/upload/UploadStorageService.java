@@ -168,6 +168,28 @@ public interface UploadStorageService {
   void setIdFactory(UploadIdFactory idFactory);
 
   /**
+   * Set whether {@link #cleanupExpiredUploads(UploadLockingService)} also removes completed uploads
+   * whose expiration timestamp has passed. Completed uploads are kept by default so they remain
+   * available until the application deletes them; applications that move completed uploads
+   * elsewhere can enable this so uploads they never deleted, for example after a crash, are removed
+   * as well.
+   *
+   * @param enabled True to remove expired completed uploads, false to keep them
+   */
+  default void setCompletedUploadExpirationEnabled(boolean enabled) {
+    // No-op for backward compatibility
+  }
+
+  /**
+   * Check if expired completed uploads are removed during cleanup.
+   *
+   * @return True if enabled, false otherwise
+   */
+  default boolean isCompletedUploadExpirationEnabled() {
+    return false;
+  }
+
+  /**
    * Set whether appended upload bytes are forced to the storage device before an append returns.
    * Disabling it avoids one synchronous flush per request, but bytes acknowledged to the client can
    * be lost on a power failure; the stored offset is then expected to be reconciled with the bytes

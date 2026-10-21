@@ -26,15 +26,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.InvalidUploadOffsetException;
+import me.desair.tus.server.exception.UploadAlreadyLockedException;
 import me.desair.tus.server.exception.UploadNotFoundException;
 import me.desair.tus.server.upload.UploadId;
 import me.desair.tus.server.upload.UploadIdFactory;
 import me.desair.tus.server.upload.UploadInfo;
+import me.desair.tus.server.upload.UploadLock;
 import me.desair.tus.server.upload.UploadLockingService;
 import me.desair.tus.server.upload.UploadType;
 import me.desair.tus.server.util.Utils;
@@ -579,6 +582,66 @@ public class DiskStorageServiceTest {
   }
 
   @Test
+  public void cleanupExpiredUploadsRemovesExpiredCompletedUploadsWhenEnabled() throws Exception {
+    storageService.setCompletedUploadExpirationEnabled(true);
+    UploadInfo info = createUploadExpiredSince(1000L, "complete", 8L);
+    when(uploadLockingService.lockUpload(info.getId())).thenReturn(mock(UploadLock.class));
+
+    storageService.cleanupExpiredUploads(uploadLockingService);
+
+    assertFalse(Files.exists(getStoragePath(info.getId())));
+  }
+
+  @Test
+  public void cleanupExpiredUploadsKeepsUploadResumedBeforeItIsLocked() throws Exception {
+    UploadInfo info = createUploadExpiredSince(1000L, "part", 8L);
+    when(uploadLockingService.lockUpload(info.getId()))
+        .then(
+            invocation -> {
+              // A PATCH request extends the expiration after the filter accepted the upload
+              UploadInfo resumed = storageService.getUploadInfo(info.getId());
+              resumed.updateExpiration(3600_000L);
+              storageService.update(resumed);
+              return mock(UploadLock.class);
+            });
+
+    storageService.cleanupExpiredUploads(uploadLockingService);
+
+    assertTrue(Files.exists(getUploadInfoPath(info.getId())));
+  }
+
+  @Test
+  public void cleanupExpiredUploadsSkipsUploadsLockedAfterTheyWereAccepted() throws Exception {
+    UploadInfo locked = createUploadExpiredSince(1000L, "part", 8L);
+    UploadInfo unlocked = createUploadExpiredSince(1000L, "part", 8L);
+    when(uploadLockingService.lockUpload(locked.getId()))
+        .thenThrow(new UploadAlreadyLockedException("locked"));
+    when(uploadLockingService.lockUpload(unlocked.getId())).thenReturn(mock(UploadLock.class));
+
+    storageService.cleanupExpiredUploads(uploadLockingService);
+
+    assertTrue(Files.exists(getUploadInfoPath(locked.getId())));
+    assertFalse(Files.exists(getStoragePath(unlocked.getId())));
+  }
+
+  @Test
+  public void cleanupExpiredUploadsRemovesAbandonedUploadDirectories() throws Exception {
+    storageService.setUploadExpirationPeriod(60_000L);
+    UploadInfo info = storageService.create(new UploadInfo(), null);
+    // An info file left empty by an interrupted write cannot be read anymore
+    Files.write(getUploadInfoPath(info.getId()), new byte[0]);
+    FileTime modified = FileTime.fromMillis(System.currentTimeMillis() - 120_000L);
+    Files.setLastModifiedTime(getUploadInfoPath(info.getId()), modified);
+    Files.setLastModifiedTime(getUploadDataPath(info.getId()), modified);
+    Files.setLastModifiedTime(getStoragePath(info.getId()), modified);
+    when(uploadLockingService.lockUpload(info.getId())).thenReturn(mock(UploadLock.class));
+
+    storageService.cleanupExpiredUploads(uploadLockingService);
+
+    assertFalse(Files.exists(getStoragePath(info.getId())));
+  }
+
+  @Test
   public void testDeduplicationEnabled() throws Exception {
     storageService.setUploadDeduplicationEnabled(true);
     assertTrue(storageService.isUploadDeduplicationEnabled());
@@ -766,6 +829,17 @@ public class DiskStorageServiceTest {
     // Parent expiration should be nullified to match child
     parent = storageService.getUploadInfo(parent.getId());
     assertThat(parent.getExpirationTimestamp(), is(nullValue()));
+  }
+
+  private UploadInfo createUploadExpiredSince(long age, String content, long length)
+      throws Exception {
+    UploadInfo info = new UploadInfo();
+    info.setLength(length);
+    info = storageService.create(info, null);
+    info = storageService.append(info, IOUtils.toInputStream(content, StandardCharsets.UTF_8));
+    info.setExpirationTimestamp(System.currentTimeMillis() - age);
+    storageService.update(info);
+    return info;
   }
 
   private Path getUploadInfoPath(UploadId id) {

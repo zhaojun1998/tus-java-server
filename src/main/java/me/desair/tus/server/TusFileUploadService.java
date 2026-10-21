@@ -135,6 +135,8 @@ public class TusFileUploadService {
         this.uploadStorageService.getUploadExpirationPeriod());
     uploadStorageService.setUploadDataSyncEnabled(
         this.uploadStorageService.isUploadDataSyncEnabled());
+    uploadStorageService.setCompletedUploadExpirationEnabled(
+        this.uploadStorageService.isCompletedUploadExpirationEnabled());
     uploadStorageService.setIdFactory(this.idFactory);
     // Update the upload storage service
     this.uploadStorageService = uploadStorageService;
@@ -221,6 +223,22 @@ public class TusFileUploadService {
    */
   public TusFileUploadService withDownloadFeature() {
     addTusExtension(new DownloadExtension());
+    return this;
+  }
+
+  /**
+   * Enable or disable removing completed uploads during {@link #cleanup()} once their expiration
+   * timestamp has passed. This is disabled by default, so completed uploads are kept until {@link
+   * #deleteUpload(String)} is invoked. Enable it when completed uploads are moved elsewhere and
+   * deleted afterwards, so uploads that were never deleted, for example because the application
+   * stopped first, do not stay on disk forever. It has no effect without an upload expiration
+   * period.
+   *
+   * @param isEnabled True to remove expired completed uploads, false to keep them
+   * @return The current service
+   */
+  public TusFileUploadService withCompletedUploadExpiration(boolean isEnabled) {
+    this.uploadStorageService.setCompletedUploadExpirationEnabled(isEnabled);
     return this;
   }
 
