@@ -17,7 +17,6 @@ import java.io.OutputStream;
 import java.io.Serializable;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedList;
@@ -132,18 +131,11 @@ public class Utils {
 
           output.writeObject(object);
         }
-        moveReplacing(tempPath, path);
+        // The temporary file is a sibling of the target, so both are on the same file store
+        Files.move(tempPath, path, ATOMIC_MOVE, REPLACE_EXISTING);
       } finally {
         Files.deleteIfExists(tempPath);
       }
-    }
-  }
-
-  private static void moveReplacing(Path source, Path target) throws IOException {
-    try {
-      Files.move(source, target, ATOMIC_MOVE, REPLACE_EXISTING);
-    } catch (AtomicMoveNotSupportedException e) {
-      Files.move(source, target, REPLACE_EXISTING);
     }
   }
 

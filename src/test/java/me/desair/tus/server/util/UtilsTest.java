@@ -148,6 +148,13 @@ public class UtilsTest {
   }
 
   @Test
+  public void readSerializableWithMissingFile() throws Exception {
+    Path missing = storagePath.resolve("missing-" + UUID.randomUUID());
+
+    assertThat(Utils.readSerializable(missing, TestSerializable.class), is(nullValue()));
+  }
+
+  @Test
   public void readSerializableWithNullPath() throws Exception {
     // Should return null when path is null
     TestSerializable result = Utils.readSerializable(null, TestSerializable.class);
