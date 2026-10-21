@@ -4,6 +4,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertThrows;
@@ -17,7 +18,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.SequenceInputStream;
@@ -29,6 +32,7 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 import java.util.UUID;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.InvalidUploadOffsetException;
@@ -321,6 +325,28 @@ public class DiskStorageServiceTest {
     // allowed
     assertThat(
         new String(Files.readAllBytes(getUploadDataPath(info.getId()))), is("This is an upload"));
+  }
+
+  @Test
+  public void appendLargerThanCopyBuffer() throws Exception {
+    // More than two copy blocks, delivered in the small pieces a servlet container returns
+    byte[] content = new byte[600_000];
+    new Random(42).nextBytes(content);
+    UploadInfo info = new UploadInfo();
+    info.setLength((long) content.length);
+    info = storageService.create(info, null);
+    InputStream smallReads =
+        new FilterInputStream(new ByteArrayInputStream(content)) {
+          @Override
+          public int read(byte[] b, int off, int len) throws IOException {
+            return super.read(b, off, Math.min(len, 8192));
+          }
+        };
+
+    storageService.append(info, smallReads);
+
+    assertArrayEquals(content, Files.readAllBytes(getUploadDataPath(info.getId())));
+    assertThat(storageService.getUploadInfo(info.getId()).getOffset(), is((long) content.length));
   }
 
   @Test

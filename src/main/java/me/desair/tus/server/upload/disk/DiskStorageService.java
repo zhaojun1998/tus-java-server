@@ -7,9 +7,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
-import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
@@ -47,6 +47,14 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   private static final String UPLOAD_SUB_DIRECTORY = "uploads";
   private static final String INFO_FILE = "info";
   private static final String DATA_FILE = "data";
+
+  /**
+   * Number of request bytes collected before each write to the data file of an upload. Servlet
+   * containers return request bytes in pieces of a few kilobytes; collecting them into larger
+   * blocks reduces the number of write calls by the same factor, which keeps a single large upload
+   * from being limited by one CPU core. Larger blocks did not upload faster in measurements.
+   */
+  private static final int APPEND_BUFFER_SIZE = 256 * 1024;
 
   private Long maxUploadSize = null;
   private Long uploadExpirationPeriod = null;
@@ -298,8 +306,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
       Long offset = info.getOffset();
       long newOffset = offset;
 
-      try (ReadableByteChannel uploadedBytes = Channels.newChannel(inputStream);
-          FileChannel file = FileChannel.open(bytesPath, WRITE)) {
+      try (FileChannel file = FileChannel.open(bytesPath, WRITE)) {
 
         try {
           // Lock will be released when the channel closes
@@ -313,7 +320,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
           }
 
           // write all bytes in the channel up to the configured maximum
-          transferred = file.transferFrom(uploadedBytes, offset, max - offset);
+          transferred = copyToFile(inputStream, file, offset, max - offset);
           syncIfEnabled(file);
           newOffset = offset + transferred;
 
@@ -608,6 +615,37 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
       // For extra safety, double check that this ID is not in use yet
     } while (getUploadInfo(id) != null);
     return id;
+  }
+
+  /**
+   * Copies at most {@code maxBytes} bytes from the input stream into the file, starting at {@code
+   * position}, in blocks of {@link #APPEND_BUFFER_SIZE} bytes. When reading fails, the bytes
+   * already received for the current block are still written before the exception propagates, so
+   * the offset derived from the file size includes every byte the client delivered.
+   *
+   * @return the number of bytes written
+   */
+  private long copyToFile(InputStream inputStream, FileChannel file, long position, long maxBytes)
+      throws IOException {
+    byte[] buffer = new byte[APPEND_BUFFER_SIZE];
+    long copied = 0;
+    int read = 0;
+    while (read >= 0 && copied < maxBytes) {
+      int wanted = (int) Math.min(buffer.length, maxBytes - copied);
+      int filled = 0;
+      try {
+        while (filled < wanted && (read = inputStream.read(buffer, filled, wanted - filled)) >= 0) {
+          filled += read;
+        }
+      } finally {
+        ByteBuffer block = ByteBuffer.wrap(buffer, 0, filled);
+        while (block.hasRemaining()) {
+          file.write(block, position + copied + block.position());
+        }
+      }
+      copied += filled;
+    }
+    return copied;
   }
 
   private long writeAsMuchAsPossible(FileChannel file) throws IOException {
