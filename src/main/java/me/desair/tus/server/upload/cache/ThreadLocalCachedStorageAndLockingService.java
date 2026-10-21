@@ -175,6 +175,16 @@ public class ThreadLocalCachedStorageAndLockingService
   }
 
   @Override
+  public void setUploadDataSyncEnabled(boolean enabled) {
+    storageServiceDelegate.setUploadDataSyncEnabled(enabled);
+  }
+
+  @Override
+  public boolean isUploadDataSyncEnabled() {
+    return storageServiceDelegate.isUploadDataSyncEnabled();
+  }
+
+  @Override
   public void setUploadDeduplicationEnabled(boolean enabled) {
     storageServiceDelegate.setUploadDeduplicationEnabled(enabled);
   }

@@ -8,6 +8,7 @@ import java.io.IOException;
 import me.desair.tus.server.exception.UploadAlreadyLockedException;
 import me.desair.tus.server.upload.UploadLock;
 import me.desair.tus.server.upload.UploadLockingService;
+import me.desair.tus.server.upload.UploadStorageService;
 import org.junit.Test;
 
 public class TusFileUploadServiceTest {
@@ -177,5 +178,14 @@ public class TusFileUploadServiceTest {
       fail(
           "Should not throw exception when disabling creation-with-upload when creation is not enabled");
     }
+  }
+
+  @Test
+  public void testUploadDataSyncSettingIsKeptWhenStorageServiceIsReplaced() {
+    UploadStorageService storageService = mock(UploadStorageService.class);
+
+    new TusFileUploadService().withUploadDataSync(false).withUploadStorageService(storageService);
+
+    verify(storageService).setUploadDataSyncEnabled(false);
   }
 }

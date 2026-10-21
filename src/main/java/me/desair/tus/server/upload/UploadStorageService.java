@@ -168,6 +168,27 @@ public interface UploadStorageService {
   void setIdFactory(UploadIdFactory idFactory);
 
   /**
+   * Set whether appended upload bytes are forced to the storage device before an append returns.
+   * Disabling it avoids one synchronous flush per request, but bytes acknowledged to the client can
+   * be lost on a power failure; the stored offset is then expected to be reconciled with the bytes
+   * actually present when the upload is resumed.
+   *
+   * @param enabled True to force appended bytes to the storage device, false otherwise
+   */
+  default void setUploadDataSyncEnabled(boolean enabled) {
+    // No-op for backward compatibility
+  }
+
+  /**
+   * Check if appended upload bytes are forced to the storage device before an append returns.
+   *
+   * @return True if enabled, false otherwise
+   */
+  default boolean isUploadDataSyncEnabled() {
+    return true;
+  }
+
+  /**
    * Set whether duplicate file processing based on checksum is enabled.
    *
    * @param enabled True if enabled, false otherwise

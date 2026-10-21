@@ -1565,8 +1565,9 @@ public class ITTusFileUploadService {
     assertResponseStatus(HttpServletResponse.SC_OK);
     assertThat(servletResponse.getContentAsString(), is(uploadContent));
 
-    // Manipulate parent file directly on disk
-    String manipulatedContent = "manipulated content on disk";
+    // Manipulate parent file directly on disk, keeping its size so the stored bytes still match
+    // the offset of the completed upload
+    String manipulatedContent = StringUtils.reverse(uploadContent);
     Files.write(
         parentDataPath, manipulatedContent.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 

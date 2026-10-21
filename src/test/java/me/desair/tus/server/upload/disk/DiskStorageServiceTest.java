@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -35,6 +36,7 @@ import me.desair.tus.server.upload.UploadId;
 import me.desair.tus.server.upload.UploadIdFactory;
 import me.desair.tus.server.upload.UploadInfo;
 import me.desair.tus.server.upload.UploadLockingService;
+import me.desair.tus.server.upload.UploadType;
 import me.desair.tus.server.util.Utils;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
@@ -218,6 +220,8 @@ public class DiskStorageServiceTest {
     info2.setLength(10L);
     info2.setOffset(8L);
     info2.setEncodedMetadata("Updated Encoded Metadata");
+    // Reading aligns the offset with the stored bytes, so store as many bytes as the new offset
+    Files.write(getUploadDataPath(info1.getId()), new byte[8]);
 
     storageService.update(info2);
 
@@ -313,6 +317,63 @@ public class DiskStorageServiceTest {
     // allowed
     assertThat(
         new String(Files.readAllBytes(getUploadDataPath(info.getId()))), is("This is an upload"));
+  }
+
+  @Test
+  public void getUploadInfoAlignsOffsetWithShorterData() throws Exception {
+    // Bytes acknowledged without data sync can be lost on a power failure while the info file
+    // still records them, which would otherwise report the upload as completed
+    UploadInfo info = new UploadInfo();
+    info.setLength(20L);
+    info = storageService.create(info, null);
+    storageService.append(
+        info, IOUtils.toInputStream("01234567890123456789", StandardCharsets.UTF_8));
+    Files.write(getUploadDataPath(info.getId()), "012345".getBytes(StandardCharsets.UTF_8));
+
+    UploadInfo readInfo = storageService.getUploadInfo(info.getId());
+    assertThat(readInfo.getOffset(), is(6L));
+    assertTrue(readInfo.isUploadInProgress());
+
+    storageService.append(
+        readInfo, IOUtils.toInputStream("67890123456789", StandardCharsets.UTF_8));
+    assertThat(
+        new String(Files.readAllBytes(getUploadDataPath(info.getId())), StandardCharsets.UTF_8),
+        is("01234567890123456789"));
+  }
+
+  @Test
+  public void getUploadInfoAlignsOffsetWithLongerData() throws Exception {
+    // A crash after appending bytes but before updating the info file leaves the data ahead
+    UploadInfo info = storageService.create(new UploadInfo(), null);
+    storageService.append(info, IOUtils.toInputStream("012345", StandardCharsets.UTF_8));
+    Files.write(
+        getUploadDataPath(info.getId()),
+        "6789".getBytes(StandardCharsets.UTF_8),
+        StandardOpenOption.APPEND);
+
+    assertThat(storageService.getUploadInfo(info.getId()).getOffset(), is(10L));
+  }
+
+  @Test
+  public void getUploadInfoKeepsOffsetWhenDataExceedsLength() throws Exception {
+    UploadInfo info = new UploadInfo();
+    info.setLength(4L);
+    info = storageService.create(info, null);
+    Files.write(getUploadDataPath(info.getId()), "012345".getBytes(StandardCharsets.UTF_8));
+
+    assertThat(storageService.getUploadInfo(info.getId()).getOffset(), is(0L));
+  }
+
+  @Test
+  public void getUploadInfoKeepsOffsetOfConcatenatedUpload() throws Exception {
+    UploadInfo info = new UploadInfo();
+    info.setUploadType(UploadType.CONCATENATED);
+    info.setLength(20L);
+    info = storageService.create(info, null);
+    info.setOffset(20L);
+    storageService.update(info);
+
+    assertThat(storageService.getUploadInfo(info.getId()).getOffset(), is(20L));
   }
 
   @Test(expected = UploadNotFoundException.class)

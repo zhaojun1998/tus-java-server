@@ -192,6 +192,12 @@ public class ThreadLocalCachedStorageAndLockingServiceTest {
     service.isUploadDeduplicationEnabled();
     verify(mockStorage, times(1)).isUploadDeduplicationEnabled();
 
+    service.setUploadDataSyncEnabled(false);
+    verify(mockStorage, times(1)).setUploadDataSyncEnabled(false);
+
+    service.isUploadDataSyncEnabled();
+    verify(mockStorage, times(1)).isUploadDataSyncEnabled();
+
     service.getUploadInfoByChecksum("sum", ChecksumAlgorithm.SHA1);
     verify(mockStorage, times(1)).getUploadInfoByChecksum("sum", ChecksumAlgorithm.SHA1);
 

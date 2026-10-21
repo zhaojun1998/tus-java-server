@@ -133,6 +133,8 @@ public class TusFileUploadService {
     uploadStorageService.setMaxUploadSize(this.uploadStorageService.getMaxUploadSize());
     uploadStorageService.setUploadExpirationPeriod(
         this.uploadStorageService.getUploadExpirationPeriod());
+    uploadStorageService.setUploadDataSyncEnabled(
+        this.uploadStorageService.isUploadDataSyncEnabled());
     uploadStorageService.setIdFactory(this.idFactory);
     // Update the upload storage service
     this.uploadStorageService = uploadStorageService;
@@ -219,6 +221,20 @@ public class TusFileUploadService {
    */
   public TusFileUploadService withDownloadFeature() {
     addTusExtension(new DownloadExtension());
+    return this;
+  }
+
+  /**
+   * Enable or disable forcing appended upload bytes to the storage device before a request that
+   * uploads data completes. This is enabled by default. Disabling it removes one synchronous flush
+   * per PATCH request at the cost of losing recently acknowledged bytes on a power failure; on disk
+   * storage the offset of a resumed upload is then aligned with the bytes actually stored.
+   *
+   * @param isEnabled True to force appended bytes to the storage device, false otherwise
+   * @return The current service
+   */
+  public TusFileUploadService withUploadDataSync(boolean isEnabled) {
+    this.uploadStorageService.setUploadDataSyncEnabled(isEnabled);
     return this;
   }
 

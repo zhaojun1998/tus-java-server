@@ -14,6 +14,7 @@ import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
@@ -50,6 +51,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   private UploadIdFactory idFactory;
   private UploadConcatenationService uploadConcatenationService;
   private boolean isUploadDeduplicationEnabled = false;
+  private boolean isUploadDataSyncEnabled = true;
 
   public DiskStorageService(String storagePath) {
     super(storagePath + File.separator + UPLOAD_SUB_DIRECTORY);
@@ -76,6 +78,16 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   @Override
   public long getMaxUploadSize() {
     return maxUploadSize == null ? 0 : maxUploadSize;
+  }
+
+  @Override
+  public void setUploadDataSyncEnabled(boolean enabled) {
+    this.isUploadDataSyncEnabled = enabled;
+  }
+
+  @Override
+  public boolean isUploadDataSyncEnabled() {
+    return isUploadDataSyncEnabled;
   }
 
   @Override
@@ -136,10 +148,40 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
       if (infoPath == null || !Files.exists(infoPath)) {
         return null;
       }
-      return Utils.readSerializable(infoPath, UploadInfo.class);
+      return reconcileOffset(Utils.readSerializable(infoPath, UploadInfo.class));
     } catch (UploadNotFoundException e) {
       return null;
     }
+  }
+
+  /**
+   * Align the stored offset with the bytes actually present in the data file. The info file is
+   * written after the data, so a crash between both writes, or a power failure with data sync
+   * disabled, leaves them apart. Without this, every following PATCH would be rejected because an
+   * append requires the offset to match the data size, and a completed upload could be reported
+   * with bytes missing. The data file of a concatenated upload stays empty because its bytes live
+   * in the partial uploads, and a deduplicated upload has no data file of its own.
+   */
+  private UploadInfo reconcileOffset(UploadInfo info) throws IOException, UploadNotFoundException {
+    if (info == null || UploadType.CONCATENATED.equals(info.getUploadType())) {
+      return info;
+    }
+    Path bytesPath = getBytesPath(info.getId());
+    long size;
+    try {
+      size = Files.size(bytesPath);
+    } catch (NoSuchFileException e) {
+      return info;
+    }
+    if (size != info.getOffset() && (!info.hasLength() || size <= info.getLength())) {
+      log.warn(
+          "Offset {} of upload {} does not match the {} stored bytes, using the stored size",
+          info.getOffset(),
+          info.getId(),
+          size);
+      info.setOffset(size);
+    }
+    return info;
   }
 
   @Override
@@ -259,7 +301,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
 
           // write all bytes in the channel up to the configured maximum
           transferred = file.transferFrom(uploadedBytes, offset, max - offset);
-          file.force(true);
+          syncIfEnabled(file);
           newOffset = offset + transferred;
 
         } catch (Exception ex) {
@@ -290,7 +332,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
         file.lock();
 
         file.truncate(file.size() - byteCount);
-        file.force(true);
+        syncIfEnabled(file);
 
         info.setOffset(file.size());
         update(info);
@@ -514,9 +556,15 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   private long writeAsMuchAsPossible(FileChannel file) throws IOException {
     long offset = 0;
     if (file != null) {
-      file.force(true);
+      syncIfEnabled(file);
       offset = file.size();
     }
     return offset;
+  }
+
+  private void syncIfEnabled(FileChannel file) throws IOException {
+    if (isUploadDataSyncEnabled) {
+      file.force(true);
+    }
   }
 }
