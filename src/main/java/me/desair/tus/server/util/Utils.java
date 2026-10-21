@@ -1,7 +1,8 @@
 package me.desair.tus.server.util;
 
+import static java.nio.file.StandardCopyOption.ATOMIC_MOVE;
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.nio.file.StandardOpenOption.CREATE;
-import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.nio.file.StandardOpenOption.WRITE;
 
@@ -9,16 +10,19 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.ObjectOutput;
 import java.io.ObjectOutputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
-import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import me.desair.tus.server.HttpHeader;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
@@ -77,47 +81,69 @@ public class Utils {
     return output;
   }
 
+  /**
+   * Read a serialized object from the given path.
+   *
+   * <p>No file lock is taken: {@link #writeSerializable(Serializable, Path)} replaces the file
+   * atomically, so a reader always sees either the previous or the new complete content.
+   *
+   * @param path The file to read, or null
+   * @param clazz The expected type of the serialized object
+   * @return The deserialized object, or null if the path is null, the file does not exist or its
+   *     content is truncated or corrupted
+   * @throws IOException When the file cannot be read
+   */
   public static <T> T readSerializable(Path path, Class<T> clazz) throws IOException {
     T info = null;
-    if (path != null) {
-      try (FileChannel channel = FileChannel.open(path, READ)) {
-        // Lock will be released when the channel is closed
-        if (lockFileShared(channel) != null) {
-
-          try (ValidatingObjectInputStream ois =
-              new ValidatingObjectInputStream(Channels.newInputStream(channel))) {
-            ois.accept("java.lang.*", "java.util.*", "me.desair.tus.server.*");
-            info = clazz.cast(ois.readObject());
-          } catch (ClassNotFoundException
-              | java.io.EOFException
-              | java.io.StreamCorruptedException e) {
-            // File may be corrupted due to unexpected server shutdown
-            log.warn("Unable to read serializable file {}: {}", path, e.getMessage());
-            info = null;
-          }
-        } else {
-          throw new IOException("Unable to lock file " + path);
-        }
+    if (path != null && Files.exists(path)) {
+      try (InputStream is = Files.newInputStream(path);
+          ValidatingObjectInputStream ois = new ValidatingObjectInputStream(is)) {
+        ois.accept("java.lang.*", "java.util.*", "me.desair.tus.server.*");
+        info = clazz.cast(ois.readObject());
+      } catch (ClassNotFoundException | java.io.EOFException | java.io.StreamCorruptedException e) {
+        // File may be corrupted due to unexpected server shutdown
+        log.warn("Unable to read serializable file {}: {}", path, e.getMessage());
+        info = null;
       }
     }
     return info;
   }
 
+  /**
+   * Serialize an object to the given path.
+   *
+   * <p>The object is first written to a temporary sibling file which then atomically replaces the
+   * target. Truncating and locking the target in place would let a concurrent reader in the same
+   * JVM make the lock attempt fail with an {@link java.nio.channels.OverlappingFileLockException}
+   * after the file was already truncated, and a crash during the write would leave a partial file.
+   *
+   * @param object The object to serialize
+   * @param path The target file, or null to do nothing
+   * @throws IOException When the temporary file cannot be written or moved into place
+   */
   public static void writeSerializable(Serializable object, Path path) throws IOException {
     if (path != null) {
-      try (FileChannel channel = FileChannel.open(path, WRITE, CREATE, TRUNCATE_EXISTING)) {
-        // Lock will be released when the channel is closed
-        if (lockFileExclusively(channel) != null) {
+      Path tempPath = path.resolveSibling(path.getFileName() + "." + UUID.randomUUID() + ".tmp");
+      try {
+        try (OutputStream buffer =
+                new BufferedOutputStream(
+                    Files.newOutputStream(tempPath, WRITE, CREATE, TRUNCATE_EXISTING));
+            ObjectOutput output = new ObjectOutputStream(buffer)) {
 
-          try (OutputStream buffer = new BufferedOutputStream(Channels.newOutputStream(channel));
-              ObjectOutput output = new ObjectOutputStream(buffer)) {
-
-            output.writeObject(object);
-          }
-        } else {
-          throw new IOException("Unable to lock file " + path);
+          output.writeObject(object);
         }
+        moveReplacing(tempPath, path);
+      } finally {
+        Files.deleteIfExists(tempPath);
       }
+    }
+  }
+
+  private static void moveReplacing(Path source, Path target) throws IOException {
+    try {
+      Files.move(source, target, ATOMIC_MOVE, REPLACE_EXISTING);
+    } catch (AtomicMoveNotSupportedException e) {
+      Files.move(source, target, REPLACE_EXISTING);
     }
   }
 

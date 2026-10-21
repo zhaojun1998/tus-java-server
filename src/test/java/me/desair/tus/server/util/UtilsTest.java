@@ -19,6 +19,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 import me.desair.tus.server.HttpHeader;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import org.apache.commons.io.FileUtils;
@@ -99,6 +100,51 @@ public class UtilsTest {
     assertThat(result, is(nullValue()));
 
     Files.deleteIfExists(emptyFile);
+  }
+
+  @Test
+  public void writeSerializableWhileSameJvmReaderHoldsLock() throws Exception {
+    Path testFile = storagePath.resolve("reader-locked-" + UUID.randomUUID());
+    Utils.writeSerializable(new TestSerializable("old"), testFile);
+
+    try (FileChannel reader = FileChannel.open(testFile, StandardOpenOption.READ);
+        FileLock ignored = reader.lock(0L, Long.MAX_VALUE, true)) {
+      Utils.writeSerializable(new TestSerializable("new"), testFile);
+    }
+
+    assertThat(Utils.readSerializable(testFile, TestSerializable.class).getValue(), is("new"));
+    Files.deleteIfExists(testFile);
+  }
+
+  @Test
+  public void readSerializableWhileFileIsLockedExclusively() throws Exception {
+    Path testFile = storagePath.resolve("writer-locked-" + UUID.randomUUID());
+    Utils.writeSerializable(new TestSerializable("value"), testFile);
+
+    try (FileChannel writer = FileChannel.open(testFile, StandardOpenOption.WRITE);
+        FileLock ignored = writer.lock()) {
+      assertThat(Utils.readSerializable(testFile, TestSerializable.class).getValue(), is("value"));
+    }
+    Files.deleteIfExists(testFile);
+  }
+
+  @Test
+  public void writeSerializableFailureLeavesNoTemporaryFile() throws Exception {
+    Path directory = Files.createDirectories(storagePath.resolve("temp-" + UUID.randomUUID()));
+    Path target = Files.createDirectories(directory.resolve("target"));
+    Files.createFile(target.resolve("child"));
+
+    try {
+      Utils.writeSerializable(new TestSerializable("value"), target);
+      throw new AssertionError("Replacing a non-empty directory must fail");
+    } catch (IOException expected) {
+      // The target cannot be replaced by a file
+    }
+
+    try (Stream<Path> siblings = Files.list(directory)) {
+      assertThat(siblings.map(p -> p.getFileName().toString()).toList(), is(List.of("target")));
+    }
+    FileUtils.deleteDirectory(directory.toFile());
   }
 
   @Test
