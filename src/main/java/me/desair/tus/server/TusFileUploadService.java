@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
@@ -207,11 +208,12 @@ public class TusFileUploadService {
   }
 
   /**
-   * Set how long {@link #getUploadInfo(String, String)}, {@link #getUploadedBytes(String, String)}
-   * and {@link #deleteUpload(String, String)} wait for an upload that is locked by a request before
-   * they throw {@link UploadAlreadyLockedException}. The default of zero fails immediately. Unlike
-   * HEAD and DELETE requests, these methods never interrupt the request that holds the lock, so a
-   * PATCH request that is still receiving data keeps the upload until it completes or times out.
+   * Set how long {@link #getUploadInfo(String, String)}, {@link #getUploadedBytes(String, String)},
+   * {@link #getUploadedFile(String, String)} and {@link #deleteUpload(String, String)} wait for an
+   * upload that is locked by a request before they throw {@link UploadAlreadyLockedException}. The
+   * default of zero fails immediately. Unlike HEAD and DELETE requests, these methods never
+   * interrupt the request that holds the lock, so a PATCH request that is still receiving data
+   * keeps the upload until it completes or times out.
    *
    * @param timeout The maximum time to wait for the upload lock, zero to fail immediately
    * @return The current service
@@ -457,6 +459,25 @@ public class TusFileUploadService {
               "Waiting for the lock of upload " + uploadUri + " was interrupted", ie);
         }
       }
+    }
+  }
+
+  /**
+   * Get the local file that holds the bytes of a completed upload, see {@link
+   * UploadStorageService#getUploadedFile(String, String)}. The file may only be moved away when the
+   * upload is deleted afterwards with {@link #deleteUpload(String, String)}.
+   *
+   * @param uploadUri The URI of the upload
+   * @param ownerKey The key of the owner of this upload
+   * @return The file with the uploaded bytes, or null if the storage service does not keep them in
+   *     a single local file that belongs to this upload alone
+   * @throws IOException When retrieving the file fails
+   * @throws TusException When the upload is still in progress or cannot be found
+   */
+  public Path getUploadedFile(String uploadUri, String ownerKey) throws IOException, TusException {
+    try (UploadLock lock = lockUploadWithinTimeout(uploadUri)) {
+
+      return uploadStorageService.getUploadedFile(uploadUri, ownerKey);
     }
   }
 

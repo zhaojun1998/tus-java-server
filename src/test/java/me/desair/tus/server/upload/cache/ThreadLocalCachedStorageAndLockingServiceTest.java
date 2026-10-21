@@ -187,6 +187,9 @@ public class ThreadLocalCachedStorageAndLockingServiceTest {
     service.getUploadedBytes("/files/1", "owner");
     verify(mockStorage, times(1)).getUploadedBytes("/files/1", "owner");
 
+    service.getUploadedFile("/files/1", "owner");
+    verify(mockStorage, times(1)).getUploadedFile("/files/1", "owner");
+
     service.copyUploadTo(info, mock(OutputStream.class));
     verify(mockStorage, times(1)).copyUploadTo(any(), any());
 

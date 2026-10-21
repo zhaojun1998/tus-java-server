@@ -22,6 +22,7 @@ import java.util.Objects;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.InvalidUploadOffsetException;
 import me.desair.tus.server.exception.TusException;
+import me.desair.tus.server.exception.UploadInProgressException;
 import me.desair.tus.server.exception.UploadNotFoundException;
 import me.desair.tus.server.upload.UploadId;
 import me.desair.tus.server.upload.UploadIdFactory;
@@ -385,6 +386,32 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   @Override
   public UploadConcatenationService getUploadConcatenationService() {
     return uploadConcatenationService;
+  }
+
+  @Override
+  public Path getUploadedFile(String uploadUri, String ownerKey) throws IOException, TusException {
+    UploadId id = idFactory.readUploadId(uploadUri);
+
+    UploadInfo uploadInfo = getUploadInfo(id);
+    if (uploadInfo == null || !Objects.equals(uploadInfo.getOwnerKey(), ownerKey)) {
+      throw new UploadNotFoundException(
+          "The upload with id " + id + " could not be found for owner " + ownerKey);
+    }
+    if (uploadInfo.isUploadInProgress()) {
+      throw new UploadInProgressException("The upload with id " + id + " is still in progress");
+    }
+    // A checksum is only stored to index the upload for deduplication, so later uploads with the
+    // same checksum may read these bytes
+    if (UploadType.CONCATENATED.equals(uploadInfo.getUploadType())
+        || uploadInfo.getDuplicatesUploadId() != null
+        || uploadInfo.getChecksum() != null) {
+      return null;
+    }
+    Path bytesPath = getBytesPath(id);
+    if (!Files.exists(bytesPath)) {
+      throw new UploadNotFoundException("The upload bytes for id " + id + " could not be found.");
+    }
+    return bytesPath;
   }
 
   @Override

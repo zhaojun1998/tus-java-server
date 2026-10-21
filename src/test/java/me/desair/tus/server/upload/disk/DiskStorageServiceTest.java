@@ -33,6 +33,7 @@ import java.util.UUID;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.InvalidUploadOffsetException;
 import me.desair.tus.server.exception.UploadAlreadyLockedException;
+import me.desair.tus.server.exception.UploadInProgressException;
 import me.desair.tus.server.exception.UploadNotFoundException;
 import me.desair.tus.server.upload.UploadId;
 import me.desair.tus.server.upload.UploadIdFactory;
@@ -377,6 +378,76 @@ public class DiskStorageServiceTest {
     storageService.update(info);
 
     assertThat(storageService.getUploadInfo(info.getId()).getOffset(), is(20L));
+  }
+
+  @Test
+  public void getUploadedFileOfCompletedUpload() throws Exception {
+    UploadInfo info = new UploadInfo();
+    info.setLength(8L);
+    info = storageService.create(info, "foo");
+    storageService.append(info, IOUtils.toInputStream("complete", StandardCharsets.UTF_8));
+
+    Path file = storageService.getUploadedFile(UPLOAD_URL + "/" + info.getId(), "foo");
+
+    assertThat(Files.readString(file), is("complete"));
+  }
+
+  @Test
+  public void getUploadedFileRejectsUnavailableUploads() throws Exception {
+    UploadInfo inProgress = new UploadInfo();
+    inProgress.setLength(8L);
+    inProgress = storageService.create(inProgress, "foo");
+    String inProgressUri = UPLOAD_URL + "/" + inProgress.getId();
+    storageService.append(inProgress, IOUtils.toInputStream("part", StandardCharsets.UTF_8));
+
+    UploadInfo completed = new UploadInfo();
+    completed.setLength(8L);
+    completed = storageService.create(completed, "foo");
+    String completedUri = UPLOAD_URL + "/" + completed.getId();
+    storageService.append(completed, IOUtils.toInputStream("complete", StandardCharsets.UTF_8));
+
+    assertThrows(
+        UploadInProgressException.class,
+        () -> storageService.getUploadedFile(inProgressUri, "foo"));
+    assertThrows(
+        UploadNotFoundException.class, () -> storageService.getUploadedFile(completedUri, "bar"));
+    Files.delete(getUploadDataPath(completed.getId()));
+    assertThrows(
+        UploadNotFoundException.class, () -> storageService.getUploadedFile(completedUri, "foo"));
+  }
+
+  @Test
+  public void getUploadedFileOfUploadsSharingBytes() throws Exception {
+    UploadInfo indexed = new UploadInfo();
+    indexed.setLength(8L);
+    indexed = storageService.create(indexed, null);
+    storageService.append(indexed, IOUtils.toInputStream("complete", StandardCharsets.UTF_8));
+    indexed.setChecksum("checksum");
+    indexed.setChecksumAlgorithm(ChecksumAlgorithm.SHA256);
+    storageService.update(indexed);
+
+    UploadInfo duplicate = new UploadInfo();
+    duplicate.setLength(8L);
+    duplicate = storageService.create(duplicate, null);
+    storageService.append(duplicate, IOUtils.toInputStream("complete", StandardCharsets.UTF_8));
+    duplicate.setDuplicatesUploadId(indexed.getId());
+    storageService.update(duplicate);
+
+    UploadInfo concatenated = new UploadInfo();
+    concatenated.setUploadType(UploadType.CONCATENATED);
+    concatenated.setLength(8L);
+    concatenated = storageService.create(concatenated, null);
+    concatenated.setOffset(8L);
+    storageService.update(concatenated);
+
+    assertThat(
+        storageService.getUploadedFile(UPLOAD_URL + "/" + indexed.getId(), null), is(nullValue()));
+    assertThat(
+        storageService.getUploadedFile(UPLOAD_URL + "/" + duplicate.getId(), null),
+        is(nullValue()));
+    assertThat(
+        storageService.getUploadedFile(UPLOAD_URL + "/" + concatenated.getId(), null),
+        is(nullValue()));
   }
 
   @Test(expected = UploadNotFoundException.class)

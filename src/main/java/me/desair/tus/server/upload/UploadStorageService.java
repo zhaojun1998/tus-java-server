@@ -3,6 +3,7 @@ package me.desair.tus.server.upload;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Path;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.TusException;
 import me.desair.tus.server.exception.UploadNotFoundException;
@@ -97,6 +98,23 @@ public interface UploadStorageService {
    * @throws UploadNotFoundException When the proved id is not linked to an upload
    */
   InputStream getUploadedBytes(UploadId id) throws IOException, UploadNotFoundException;
+
+  /**
+   * Get the local file that holds all bytes of the given completed upload, so an application that
+   * deletes the upload afterwards can move the file instead of copying its bytes. Concatenated
+   * uploads spread their bytes over several files and deduplication lets uploads share bytes, so
+   * those uploads have no such file.
+   *
+   * @param uploadUri The URI of the upload
+   * @param ownerKey The owner key of this upload
+   * @return The file with the uploaded bytes, or null if the bytes are not kept in a single local
+   *     file that belongs to this upload alone
+   * @throws IOException When retrieving the file from the storage layer fails
+   * @throws TusException When the upload cannot be found for this owner or is still in progress
+   */
+  default Path getUploadedFile(String uploadUri, String ownerKey) throws IOException, TusException {
+    return null;
+  }
 
   /**
    * Copy the uploaded bytes to the given output stream.

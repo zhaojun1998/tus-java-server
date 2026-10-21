@@ -222,6 +222,8 @@ public class TusFileUploadServiceTest {
         .thenThrow(locked)
         .thenReturn(lock)
         .thenThrow(locked)
+        .thenReturn(lock)
+        .thenThrow(locked)
         .thenReturn(lock);
     TusFileUploadService service =
         new TusFileUploadService()
@@ -231,9 +233,10 @@ public class TusFileUploadServiceTest {
 
     service.getUploadInfo("/files/test", "owner");
     service.getUploadedBytes("/files/test", "owner");
+    service.getUploadedFile("/files/test", "owner");
     service.deleteUpload("/files/test", "owner");
 
-    verify(lock, times(3)).close();
+    verify(lock, times(4)).close();
     verify(lockingService, never()).requestLockRelease(anyString());
   }
 

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
+import java.nio.file.Path;
 import java.util.Objects;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.TusException;
@@ -111,6 +112,11 @@ public class ThreadLocalCachedStorageAndLockingService
     UploadInfo uploadInfo = storageServiceDelegate.create(info, ownerKey);
     uploadInfoCache.set(new WeakReference<>(uploadInfo));
     return uploadInfo;
+  }
+
+  @Override
+  public Path getUploadedFile(String uploadUri, String ownerKey) throws IOException, TusException {
+    return storageServiceDelegate.getUploadedFile(uploadUri, ownerKey);
   }
 
   @Override
