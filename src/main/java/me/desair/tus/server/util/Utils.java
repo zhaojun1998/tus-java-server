@@ -6,9 +6,9 @@ import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.nio.file.StandardOpenOption.WRITE;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
-import java.io.ObjectInputStream;
 import java.io.ObjectOutput;
 import java.io.ObjectOutputStream;
 import java.io.OutputStream;
@@ -19,7 +19,10 @@ import java.nio.channels.FileLock;
 import java.nio.file.Path;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.regex.Pattern;
 import me.desair.tus.server.HttpHeader;
+import me.desair.tus.server.checksum.ChecksumAlgorithm;
+import org.apache.commons.io.serialization.ValidatingObjectInputStream;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +33,7 @@ public class Utils {
   private static final Logger log = LoggerFactory.getLogger(Utils.class);
   private static final int LOCK_FILE_RETRY_COUNT = 3;
   private static final long LOCK_FILE_SLEEP_TIME = 500;
+  private static final Pattern CHECKSUM_VALUE_PATTERN = Pattern.compile("^[a-zA-Z0-9+/=\\-_]+$");
 
   private Utils() {
     // This is a utility class that only holds static utility methods
@@ -80,9 +84,13 @@ public class Utils {
         // Lock will be released when the channel is closed
         if (lockFileShared(channel) != null) {
 
-          try (ObjectInputStream ois = new ObjectInputStream(Channels.newInputStream(channel))) {
+          try (ValidatingObjectInputStream ois =
+              new ValidatingObjectInputStream(Channels.newInputStream(channel))) {
+            ois.accept("java.lang.*", "java.util.*", "me.desair.tus.server.*");
             info = clazz.cast(ois.readObject());
-          } catch (ClassNotFoundException | java.io.EOFException | java.io.StreamCorruptedException e) {
+          } catch (ClassNotFoundException
+              | java.io.EOFException
+              | java.io.StreamCorruptedException e) {
             // File may be corrupted due to unexpected server shutdown
             log.warn("Unable to read serializable file {}: {}", path, e.getMessage());
             info = null;
@@ -150,5 +158,51 @@ public class Utils {
     } while (lock == null && i < LOCK_FILE_RETRY_COUNT);
 
     return lock;
+  }
+
+  /** Helper class to store parsed checksum header information. */
+  public static class ChecksumInfo {
+    private final ChecksumAlgorithm algorithm;
+    private final String value;
+
+    public ChecksumInfo(ChecksumAlgorithm algorithm, String value) {
+      this.algorithm = algorithm;
+      this.value = value;
+    }
+
+    public ChecksumAlgorithm getAlgorithm() {
+      return algorithm;
+    }
+
+    public String getValue() {
+      return value;
+    }
+  }
+
+  /**
+   * Parse the Upload-Checksum header from the HTTP request.
+   *
+   * @param request The HttpServletRequest
+   * @return ChecksumInfo if header is present and valid, null otherwise
+   */
+  public static ChecksumInfo parseUploadChecksumHeader(HttpServletRequest request) {
+    String uploadChecksumHeader = request.getHeader(HttpHeader.UPLOAD_CHECKSUM);
+    if (StringUtils.isNotBlank(uploadChecksumHeader)) {
+      ChecksumAlgorithm algorithm = ChecksumAlgorithm.forUploadChecksumHeader(uploadChecksumHeader);
+      String checksumValue =
+          StringUtils.substringAfter(
+              uploadChecksumHeader, ChecksumAlgorithm.CHECKSUM_VALUE_SEPARATOR);
+      if (algorithm != null
+          && StringUtils.isNotBlank(checksumValue)
+          && CHECKSUM_VALUE_PATTERN.matcher(checksumValue).matches()) {
+        return new ChecksumInfo(algorithm, checksumValue);
+      }
+    }
+    return null;
+  }
+
+  public static String getUploadURI(HttpServletRequest request, HttpServletResponse response) {
+    String location = response.getHeader(HttpHeader.LOCATION);
+    return StringUtils.isNotBlank(location) ? location : request.getRequestURI();
   }
 }

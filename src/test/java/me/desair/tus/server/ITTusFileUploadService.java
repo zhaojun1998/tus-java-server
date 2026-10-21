@@ -102,11 +102,13 @@ public class ITTusFileUploadService {
         containsInAnyOrder(
             "core",
             "creation",
+            "creation-with-upload",
             "checksum",
             "termination",
             "download",
             "expiration",
-            "concatenation"));
+            "concatenation",
+            "cors"));
   }
 
   @Test
@@ -120,7 +122,14 @@ public class ITTusFileUploadService {
 
     assertThat(
         tusFileUploadService.getEnabledFeatures(),
-        containsInAnyOrder("core", "creation", "checksum", "expiration", "concatenation"));
+        containsInAnyOrder(
+            "core",
+            "creation",
+            "creation-with-upload",
+            "checksum",
+            "expiration",
+            "concatenation",
+            "cors"));
 
     reset();
     servletRequest.setMethod("GET");
@@ -268,6 +277,53 @@ public class ITTusFileUploadService {
     assertResponseStatus(HttpServletResponse.SC_NOT_FOUND);
     assertResponseHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
     assertResponseHeader(HttpHeader.CONTENT_LENGTH, "0");
+  }
+
+  @Test
+  public void testProcessZeroByteUpload() throws Exception {
+    // Create upload
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 0);
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, 0);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseHeaderNotBlank(HttpHeader.LOCATION);
+    assertResponseHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    assertResponseHeader(HttpHeader.CONTENT_LENGTH, "0");
+    assertResponseHeaderNotBlank(HttpHeader.UPLOAD_EXPIRES);
+    assertResponseStatus(HttpServletResponse.SC_CREATED);
+
+    String location =
+        UPLOAD_URI
+            + StringUtils.substringAfter(
+                servletResponse.getHeader(HttpHeader.LOCATION), UPLOAD_URI);
+
+    // Get upload info from service
+    UploadInfo info = tusFileUploadService.getUploadInfo(location, OWNER_KEY);
+    assertFalse(info.isUploadInProgress());
+    assertThat(info.getLength(), is(0L));
+    assertThat(info.getOffset(), is(0L));
+
+    // Get uploaded bytes from service
+    try (InputStream uploadedBytes = tusFileUploadService.getUploadedBytes(location, OWNER_KEY)) {
+      assertThat(IOUtils.toString(uploadedBytes, StandardCharsets.UTF_8), is(""));
+    }
+
+    // Make sure cleanup does not interfere with this test
+    tusFileUploadService.cleanup();
+
+    // Download the upload
+    reset();
+    servletRequest.setMethod("GET");
+    servletRequest.setRequestURI(location);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    assertResponseHeader(HttpHeader.CONTENT_LENGTH, "0");
+    assertResponseStatus(HttpServletResponse.SC_OK);
+    assertThat(servletResponse.getContentAsString(), is(""));
   }
 
   @Test
@@ -1342,6 +1398,7 @@ public class ITTusFileUploadService {
         HttpHeader.TUS_EXTENSION,
         "creation",
         "creation-defer-length",
+        "creation-with-upload",
         "checksum",
         "checksum-trailer",
         "termination",
@@ -1424,6 +1481,518 @@ public class ITTusFileUploadService {
     assertResponseStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
     assertResponseHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
     assertResponseHeader(HttpHeader.CONTENT_LENGTH, "0");
+  }
+
+  @Test
+  public void testFileDeduplicationEndToEnd() throws Exception {
+    // Enable deduplication feature
+    tusFileUploadService.withUploadDeduplication(true);
+
+    String uploadContent = "Deduplication integration test content";
+
+    // 1. First upload (Parent)
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 0);
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, uploadContent.getBytes().length);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_CREATED);
+    String parentLocation =
+        UPLOAD_URI
+            + StringUtils.substringAfter(
+                servletResponse.getHeader(HttpHeader.LOCATION), UPLOAD_URI);
+
+    reset();
+    servletRequest.setMethod("PATCH");
+    servletRequest.setRequestURI(parentLocation);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, uploadContent.getBytes().length);
+    servletRequest.addHeader(HttpHeader.UPLOAD_OFFSET, 0);
+    servletRequest.addHeader(HttpHeader.UPLOAD_CHECKSUM, "sha1 nQPKHXKplOdf9DApoZdrdm0viw4=");
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.setContent(uploadContent.getBytes());
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_NO_CONTENT);
+
+    // 2. Second upload (Child/Duplicate)
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 0);
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, uploadContent.getBytes().length);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_CREATED);
+    String childLocation =
+        UPLOAD_URI
+            + StringUtils.substringAfter(
+                servletResponse.getHeader(HttpHeader.LOCATION), UPLOAD_URI);
+
+    reset();
+    servletRequest.setMethod("PATCH");
+    servletRequest.setRequestURI(childLocation);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, uploadContent.getBytes().length);
+    servletRequest.addHeader(HttpHeader.UPLOAD_OFFSET, 0);
+    servletRequest.addHeader(HttpHeader.UPLOAD_CHECKSUM, "sha1 nQPKHXKplOdf9DApoZdrdm0viw4=");
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.setContent(uploadContent.getBytes());
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_NO_CONTENT);
+
+    // 3. Verify deduplication succeeded
+    UploadInfo parentInfo = tusFileUploadService.getUploadInfo(parentLocation, OWNER_KEY);
+    UploadInfo childInfo = tusFileUploadService.getUploadInfo(childLocation, OWNER_KEY);
+
+    assertThat(childInfo.getDuplicatesUploadId(), is(parentInfo.getId()));
+
+    // Verify child upload physical data file does NOT exist
+    Path childDataPath =
+        storagePath.resolve("uploads").resolve(childInfo.getId().toString()).resolve("data");
+    assertFalse(Files.exists(childDataPath));
+
+    // Verify parent upload physical data file DOES exist
+    Path parentDataPath =
+        storagePath.resolve("uploads").resolve(parentInfo.getId().toString()).resolve("data");
+    assertTrue(Files.exists(parentDataPath));
+
+    // Verify child download retrieves parent's content
+    reset();
+    servletRequest.setMethod("GET");
+    servletRequest.setRequestURI(childLocation);
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_OK);
+    assertThat(servletResponse.getContentAsString(), is(uploadContent));
+
+    // Manipulate parent file directly on disk
+    String manipulatedContent = "manipulated content on disk";
+    Files.write(
+        parentDataPath, manipulatedContent.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+    // Verify parent download retrieves the manipulated content
+    reset();
+    servletRequest.setMethod("GET");
+    servletRequest.setRequestURI(parentLocation);
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_OK);
+    assertThat(servletResponse.getContentAsString(), is(manipulatedContent));
+
+    // Verify child download retrieves the same manipulated content
+    reset();
+    servletRequest.setMethod("GET");
+    servletRequest.setRequestURI(childLocation);
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_OK);
+    assertThat(servletResponse.getContentAsString(), is(manipulatedContent));
+
+    // 4. Delete parent upload
+    tusFileUploadService.deleteUpload(parentLocation, OWNER_KEY);
+
+    // 5. Attempt child download: should return 404 Not Found since parent is deleted
+    reset();
+    servletRequest.setMethod("GET");
+    servletRequest.setRequestURI(childLocation);
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_NOT_FOUND);
+  }
+
+  @Test
+  public void testLockContentionAndHeadRelease() throws Exception {
+    // 1. Create upload resource
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 0);
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, 1000L);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    String location =
+        UPLOAD_URI
+            + StringUtils.substringAfter(
+                servletResponse.getHeader(HttpHeader.LOCATION), UPLOAD_URI);
+
+    // 2. Start a blocking PATCH in a background thread to hold the lock
+    final java.util.concurrent.CountDownLatch requestStarted =
+        new java.util.concurrent.CountDownLatch(1);
+    final java.util.concurrent.atomic.AtomicReference<Exception> bgException =
+        new java.util.concurrent.atomic.AtomicReference<>();
+
+    InputStream blockingStream =
+        new InputStream() {
+          private volatile boolean closed = false;
+
+          @Override
+          public int read() throws IOException {
+            requestStarted.countDown();
+            synchronized (this) {
+              while (!closed) {
+                try {
+                  this.wait(100);
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                  throw new IOException("Interrupted", e);
+                }
+              }
+            }
+            throw new IOException("Stream closed");
+          }
+
+          @Override
+          public void close() throws IOException {
+            synchronized (this) {
+              closed = true;
+              this.notifyAll();
+            }
+          }
+        };
+
+    final MockHttpServletRequest bgRequest =
+        new MockHttpServletRequest() {
+          @Override
+          public jakarta.servlet.ServletInputStream getInputStream() {
+            return new jakarta.servlet.ServletInputStream() {
+              @Override
+              public int read() throws IOException {
+                return blockingStream.read();
+              }
+
+              @Override
+              public void close() throws IOException {
+                blockingStream.close();
+              }
+
+              @Override
+              public boolean isFinished() {
+                return false;
+              }
+
+              @Override
+              public boolean isReady() {
+                return true;
+              }
+
+              @Override
+              public void setReadListener(jakarta.servlet.ReadListener readListener) {}
+            };
+          }
+        };
+    bgRequest.setMethod("PATCH");
+    bgRequest.setRequestURI(location);
+    bgRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    bgRequest.addHeader(HttpHeader.CONTENT_LENGTH, 100);
+    bgRequest.addHeader(HttpHeader.UPLOAD_OFFSET, 0);
+    bgRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+
+    Thread bgThread =
+        new Thread(
+            new Runnable() {
+              @Override
+              public void run() {
+                try {
+                  MockHttpServletResponse bgResponse = new MockHttpServletResponse();
+                  tusFileUploadService.process(bgRequest, bgResponse, OWNER_KEY);
+                } catch (Exception e) {
+                  e.printStackTrace();
+                  bgException.set(e);
+                }
+              }
+            });
+    bgThread.start();
+
+    // Wait for the background thread to start reading (meaning it holds the lock)
+    requestStarted.await(2, java.util.concurrent.TimeUnit.SECONDS);
+
+    // 3. Concurrent PATCH request must fail immediately with 423
+    MockHttpServletRequest patchRequest = new MockHttpServletRequest();
+    MockHttpServletResponse patchResponse = new MockHttpServletResponse();
+    patchRequest.setMethod("PATCH");
+    patchRequest.setRequestURI(location);
+    patchRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    patchRequest.addHeader(HttpHeader.CONTENT_LENGTH, 10);
+    patchRequest.addHeader(HttpHeader.UPLOAD_OFFSET, 0);
+    patchRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    patchRequest.setContent(new byte[10]);
+
+    tusFileUploadService.process(patchRequest, patchResponse, OWNER_KEY);
+    assertThat(patchResponse.getStatus(), is(423));
+
+    // 4. Concurrent HEAD request must interrupt background thread and succeed
+    MockHttpServletRequest headRequest = new MockHttpServletRequest();
+    MockHttpServletResponse headResponse = new MockHttpServletResponse();
+    headRequest.setMethod("HEAD");
+    headRequest.setRequestURI(location);
+    headRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+
+    tusFileUploadService.process(headRequest, headResponse, OWNER_KEY);
+    assertThat(headResponse.getStatus(), is(204));
+    assertThat(headResponse.getHeader(HttpHeader.UPLOAD_OFFSET), is("0"));
+
+    // Clean up
+    bgThread.join(2000);
+  }
+
+  @Test
+  public void testCreationWithUploadOptions() throws Exception {
+    reset();
+    servletRequest.setMethod("OPTIONS");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseHeader(
+        HttpHeader.TUS_EXTENSION,
+        "creation",
+        "creation-defer-length",
+        "creation-with-upload",
+        "checksum",
+        "checksum-trailer",
+        "termination",
+        "download",
+        "expiration",
+        "concatenation",
+        "concatenation-unfinished");
+  }
+
+  @Test
+  public void testCreationWithUploadSuccess() throws Exception {
+    String uploadContent = "Initial data to upload";
+    byte[] contentBytes = uploadContent.getBytes(StandardCharsets.UTF_8);
+
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.setContent(contentBytes);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_CREATED);
+    assertResponseHeaderNotBlank(HttpHeader.LOCATION);
+    assertResponseHeader(HttpHeader.UPLOAD_OFFSET, String.valueOf(contentBytes.length));
+
+    String location = servletResponse.getHeader(HttpHeader.LOCATION);
+
+    // Verify content in storage
+    try (InputStream is = tusFileUploadService.getUploadedBytes(location, OWNER_KEY)) {
+      String readContent = IOUtils.toString(is, StandardCharsets.UTF_8);
+      assertThat(readContent, is(uploadContent));
+    }
+  }
+
+  @Test
+  public void testCreationWithUploadDeferredLengthSuccess() throws Exception {
+    String uploadContent = "Initial data to upload with deferred length";
+    byte[] contentBytes = uploadContent.getBytes(StandardCharsets.UTF_8);
+
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_DEFER_LENGTH, "1");
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.setContent(contentBytes);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_CREATED);
+    assertResponseHeaderNotBlank(HttpHeader.LOCATION);
+    assertResponseHeader(HttpHeader.UPLOAD_OFFSET, String.valueOf(contentBytes.length));
+
+    String location = servletResponse.getHeader(HttpHeader.LOCATION);
+
+    // Verify content in storage
+    try (InputStream is = tusFileUploadService.getUploadedBytes(location, OWNER_KEY)) {
+      String readContent = IOUtils.toString(is, StandardCharsets.UTF_8);
+      assertThat(readContent, is(uploadContent));
+    }
+  }
+
+  @Test
+  public void testCreationWithUploadInvalidContentType() throws Exception {
+    String uploadContent = "Initial data to upload";
+    byte[] contentBytes = uploadContent.getBytes(StandardCharsets.UTF_8);
+
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/octet-stream");
+    servletRequest.setContent(contentBytes);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_NOT_ACCEPTABLE);
+  }
+
+  @Test
+  public void testCreationWithUploadExceedsLength() throws Exception {
+    String uploadContent = "Initial data to upload";
+    byte[] contentBytes = uploadContent.getBytes(StandardCharsets.UTF_8);
+
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, contentBytes.length - 5);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.setContent(contentBytes);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_BAD_REQUEST);
+  }
+
+  @Test
+  public void testCreationWithUploadDisabled() throws Exception {
+    String uploadContent = "Initial data to upload";
+    byte[] contentBytes = uploadContent.getBytes(StandardCharsets.UTF_8);
+
+    tusFileUploadService.disableTusExtension("creation-with-upload");
+    try {
+      reset();
+      servletRequest.setMethod("POST");
+      servletRequest.setRequestURI(UPLOAD_URI);
+      servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+      servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, contentBytes.length);
+      servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, contentBytes.length);
+      servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+      servletRequest.setContent(contentBytes);
+
+      tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+      assertResponseStatus(HttpServletResponse.SC_BAD_REQUEST);
+    } finally {
+      // Restore for other tests
+      tusFileUploadService =
+          new TusFileUploadService()
+              .withUploadUri(UPLOAD_URI)
+              .withStoragePath(storagePath.toAbsolutePath().toString())
+              .withMaxUploadSize(1073741824L)
+              .withUploadExpirationPeriod(2L * 24 * 60 * 60 * 1000)
+              .withDownloadFeature()
+              .withChunkedTransferDecoding(true);
+    }
+  }
+
+  @Test
+  public void testCorsHeaders() throws Exception {
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader("Origin", "https://example.com");
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, 100L);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseHeader("Access-Control-Allow-Origin", "https://example.com");
+    assertResponseHeaderNotBlank("Access-Control-Expose-Headers");
+  }
+
+  @Test
+  public void testCorsPreflight() throws Exception {
+    reset();
+    servletRequest.setMethod("OPTIONS");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader("Origin", "https://example.com");
+    servletRequest.addHeader("Access-Control-Request-Method", "PATCH");
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseHeader("Access-Control-Allow-Origin", "https://example.com");
+    assertResponseHeader("Access-Control-Allow-Methods", "POST, GET, HEAD, PATCH, DELETE, OPTIONS");
+    assertResponseHeaderNotBlank("Access-Control-Allow-Headers");
+    assertResponseHeader("Access-Control-Max-Age", "86400");
+  }
+
+  @Test
+  public void testTusVersionHeaderOn412() throws Exception {
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "2.0.0");
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_PRECONDITION_FAILED);
+    assertResponseHeader(HttpHeader.TUS_VERSION, "1.0.0");
+  }
+
+  @Test
+  public void testModifyUploadLengthOnPatch() throws Exception {
+    // 1. Create upload with deferred length
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_DEFER_LENGTH, "1");
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_CREATED);
+    String location = servletResponse.getHeader(HttpHeader.LOCATION);
+
+    // 2. Set length to 100 on PATCH
+    reset();
+    servletRequest.setMethod("PATCH");
+    servletRequest.setRequestURI(location);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_OFFSET, "0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, "100");
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.setContent("test content".getBytes(StandardCharsets.UTF_8));
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_NO_CONTENT);
+
+    // 3. Try to change length to 200 on subsequent PATCH -> should return 400
+    reset();
+    servletRequest.setMethod("PATCH");
+    servletRequest.setRequestURI(location);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_OFFSET, "12");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, "200");
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.setContent("more content".getBytes(StandardCharsets.UTF_8));
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_BAD_REQUEST);
+  }
+
+  @Test
+  public void testCreationWithUploadChecksumSuccess() throws Exception {
+    String uploadContent = "Initial data to upload with checksum";
+    byte[] contentBytes = uploadContent.getBytes(StandardCharsets.UTF_8);
+    // Base64 hash for MD5 of "Initial data to upload with checksum"
+    // Base64 of MD5 bytes: aAMsB0BZbWXCBuPWG/ADyA==
+    String base64Checksum = "aAMsB0BZbWXCBuPWG/ADyA==";
+
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.addHeader(HttpHeader.UPLOAD_CHECKSUM, "md5 " + base64Checksum);
+    servletRequest.setContent(contentBytes);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(HttpServletResponse.SC_CREATED);
+    assertResponseHeader(HttpHeader.UPLOAD_OFFSET, String.valueOf(contentBytes.length));
+  }
+
+  @Test
+  public void testCreationWithUploadChecksumMismatch() throws Exception {
+    String uploadContent = "Initial data to upload with checksum";
+    byte[] contentBytes = uploadContent.getBytes(StandardCharsets.UTF_8);
+    String invalidBase64Checksum = "aAMsB0BZbWXCBuPWG/ADyB=="; // changed A to B
+
+    reset();
+    servletRequest.setMethod("POST");
+    servletRequest.setRequestURI(UPLOAD_URI);
+    servletRequest.addHeader(HttpHeader.TUS_RESUMABLE, "1.0.0");
+    servletRequest.addHeader(HttpHeader.UPLOAD_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, contentBytes.length);
+    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.addHeader(HttpHeader.UPLOAD_CHECKSUM, "md5 " + invalidBase64Checksum);
+    servletRequest.setContent(contentBytes);
+
+    tusFileUploadService.process(servletRequest, servletResponse, OWNER_KEY);
+    assertResponseStatus(460); // Checksum mismatch
   }
 
   protected void assertResponseHeader(final String header, final String value) {

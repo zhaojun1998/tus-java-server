@@ -9,6 +9,7 @@ import me.desair.tus.server.exception.TusException;
 import me.desair.tus.server.upload.UploadStorageService;
 import me.desair.tus.server.util.Utils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Strings;
 
 /**
  * The request MUST include one of the following headers: a) Upload-Length to indicate the size of
@@ -32,12 +33,17 @@ public class UploadDeferLengthValidator implements RequestValidator {
       uploadLength = true;
     }
 
-    if (Utils.getHeader(request, HttpHeader.UPLOAD_DEFER_LENGTH).equals("1")) {
+    String deferLengthHeader = request.getHeader(HttpHeader.UPLOAD_DEFER_LENGTH);
+    if (StringUtils.isNotBlank(deferLengthHeader)) {
+      if (!"1".equals(deferLengthHeader)) {
+        throw new InvalidUploadLengthException(
+            "The " + HttpHeader.UPLOAD_DEFER_LENGTH + " header value must be 1");
+      }
       deferredLength = true;
     }
 
     String uploadConcatValue = request.getHeader(HttpHeader.UPLOAD_CONCAT);
-    if (StringUtils.startsWithIgnoreCase(uploadConcatValue, "final")) {
+    if (Strings.CI.startsWith(uploadConcatValue, "final")) {
       concatenatedUpload = true;
     }
 

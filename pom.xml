@@ -3,7 +3,7 @@
 
     <groupId>me.desair.tus</groupId>
     <artifactId>tus-java-server</artifactId>
-    <version>1.0.0-3.2</version>
+    <version>1.0.0-3.3</version>
     <packaging>jar</packaging>
 
     <name>${project.groupId}:${project.artifactId}</name>
@@ -17,6 +17,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
+        <jacoco.coverage.limit>95</jacoco.coverage.limit>
+        <jacoco.compare.branch />
     </properties>
 
     <dependencies>
@@ -64,13 +66,13 @@
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-test</artifactId>
-            <version>6.2.2</version>
+            <version>6.2.19</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-web</artifactId>
-            <version>6.2.2</version>
+            <version>6.2.19</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -92,7 +94,7 @@
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
-                <version>0.8.10</version>
+                <version>0.8.15</version>
                 <executions>
                     <!--
                         Prepares the property pointing to the JaCoCo runtime agent which
@@ -173,7 +175,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>2.22.2</version>
+                <version>3.2.5</version>
                 <configuration>
                     <!-- Sets the VM argument line used when unit tests are run. -->
                     <argLine>${surefireArgLine}</argLine>
@@ -185,7 +187,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
-                <version>2.22.2</version>
+                <version>3.2.5</version>
                 <configuration>
                     <!-- Sets the VM argument line used when integration tests are run. -->
                     <argLine>${failsafeArgLine}</argLine>
@@ -205,7 +207,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
+                <version>3.13.0</version>
                 <configuration>
                     <source>17</source>
                     <encoding>UTF-8</encoding>
@@ -245,7 +247,7 @@
                     <plugin>
                         <groupId>org.sonarsource.scanner.maven</groupId>
                         <artifactId>sonar-maven-plugin</artifactId>
-                        <version>3.9.1.2184</version>
+                        <version>5.7.0.6970</version>
                         <executions>
                             <execution>
                                 <id>sonar-code-analysis</id>
@@ -267,7 +269,7 @@
                     <plugin>
                         <groupId>com.spotify.fmt</groupId>
                         <artifactId>fmt-maven-plugin</artifactId>
-                        <version>2.20</version>
+                        <version>2.29</version>
                         <configuration>
                             <style>google</style>
                         </configuration>
@@ -294,27 +296,19 @@
             </activation>
             <build>
                 <plugins>
-                    <!-- Configure Nexus plugin for new releases via Sonatype.
-                         See: http://central.sonatype.org/pages/apache-maven.html -->
+                    <!-- Configure Central Publishing Plugin for new releases via Sonatype.
+                         See: https://central.sonatype.org/publish/publish-portal-maven/ -->
                     <plugin>
-                        <groupId>org.sonatype.plugins</groupId>
-                        <artifactId>nexus-staging-maven-plugin</artifactId>
-                        <version>1.6.13</version>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.10.0</version>
                         <extensions>true</extensions>
-                        <configuration>
-                            <!-- In your settings.xml, your username/password
-                                 MUST be specified for server 'ossrh' -->
-                            <serverId>ossrh</serverId>
-                            <nexusUrl>https://oss.sonatype.org/</nexusUrl>
-                            <!-- Require manual verification / release to Maven Central -->
-                            <autoReleaseAfterClose>false</autoReleaseAfterClose>
-                        </configuration>
                     </plugin>
-                    <!-- For new releases, generate Source JAR files -->
+                    <!-- Per Sonatype publishing requirements, generate Source JAR files -->
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-source-plugin</artifactId>
-                        <version>3.3.0</version>
+                        <version>3.3.1</version>
                         <executions>
                             <execution>
                                 <id>attach-sources</id>
@@ -324,11 +318,11 @@
                             </execution>
                         </executions>
                     </plugin>
-                    <!-- For new releases, generate JavaDocs -->
+                    <!-- Per Sonatype publishing requirements, generate JavaDocs for each module -->
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-javadoc-plugin</artifactId>
-                        <version>3.5.0</version>
+                        <version>3.6.3</version>
                         <executions>
                             <execution>
                                 <id>attach-javadocs</id>
@@ -338,12 +332,12 @@
                             </execution>
                         </executions>
                     </plugin>
-                    <!-- Sign any new releases via GPG.
+                    <!-- Per Sonatype publishing requirements, sign any new releases via GPG.
                          NOTE: you may optionally specify the "gpg.passphrase" in your settings.xml -->
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
-                        <version>3.1.0</version>
+                        <version>3.2.4</version>
                         <executions>
                             <execution>
                                 <id>sign-artifacts</id>
@@ -357,18 +351,43 @@
                 </plugins>
             </build>
         </profile>
+        <profile>
+            <id>check-coverage</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>run-coverage-check</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>python3</executable>
+                                    <arguments>
+                                        <argument>scripts/check-coverage.py</argument>
+                                        <argument>--xml</argument>
+                                        <argument>
+                                            ${project.reporting.outputDirectory}/jacoco-ut/jacoco.xml</argument>
+                                        <argument>
+                                            ${project.reporting.outputDirectory}/jacoco-it/jacoco.xml</argument>
+                                        <argument>--limit</argument>
+                                        <argument>${jacoco.coverage.limit}</argument>
+                                        <argument>--compare-branch</argument>
+                                        <argument>${jacoco.compare.branch}</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
     </profiles>
-
-    <distributionManagement>
-        <snapshotRepository>
-            <id>ossrh</id>
-            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
-        </snapshotRepository>
-        <repository>
-            <id>ossrh</id>
-            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-        </repository>
-    </distributionManagement>
 
     <licenses>
         <license>
@@ -389,7 +408,7 @@
         <connection>scm:git:https://github.com/tomdesair/tus-java-server.git</connection>
         <developerConnection>scm:git:ssh://git@github.com/tomdesair/tus-java-server.git</developerConnection>
         <url>https://github.com/tomdesair/tus-java-server/tree/master</url>
-        <tag>HEAD</tag>
+        <tag>1.0.0-3.3</tag>
     </scm>
 
 </project>

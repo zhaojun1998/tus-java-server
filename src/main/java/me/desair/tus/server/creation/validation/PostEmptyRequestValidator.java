@@ -12,6 +12,12 @@ import me.desair.tus.server.util.Utils;
 /** An empty POST request is used to create a new upload resource. */
 public class PostEmptyRequestValidator implements RequestValidator {
 
+  private boolean creationWithUploadEnabled = false;
+
+  public void setCreationWithUploadEnabled(boolean enabled) {
+    this.creationWithUploadEnabled = enabled;
+  }
+
   @Override
   public void validate(
       HttpMethod method,
@@ -20,10 +26,12 @@ public class PostEmptyRequestValidator implements RequestValidator {
       String ownerKey)
       throws TusException {
 
-    Long contentLength = Utils.getLongHeader(request, HttpHeader.CONTENT_LENGTH);
-    if (contentLength != null && contentLength > 0) {
-      throw new InvalidContentLengthException(
-          "A POST request should have a Content-Length header with value " + "0 and no content");
+    if (!creationWithUploadEnabled) {
+      Long contentLength = Utils.getLongHeader(request, HttpHeader.CONTENT_LENGTH);
+      if (contentLength != null && contentLength > 0) {
+        throw new InvalidContentLengthException(
+            "A POST request should have a Content-Length header with value " + "0 and no content");
+      }
     }
   }
 

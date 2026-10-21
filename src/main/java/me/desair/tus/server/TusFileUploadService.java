@@ -8,11 +8,14 @@ import java.io.InputStream;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Objects;
 import java.util.Set;
 import me.desair.tus.server.checksum.ChecksumExtension;
 import me.desair.tus.server.concatenation.ConcatenationExtension;
 import me.desair.tus.server.core.CoreProtocol;
+import me.desair.tus.server.cors.CorsExtension;
 import me.desair.tus.server.creation.CreationExtension;
+import me.desair.tus.server.creationwithupload.CreationWithUploadExtension;
 import me.desair.tus.server.download.DownloadExtension;
 import me.desair.tus.server.exception.TusException;
 import me.desair.tus.server.expiration.ExpirationExtension;
@@ -28,8 +31,9 @@ import me.desair.tus.server.upload.disk.DiskLockingService;
 import me.desair.tus.server.upload.disk.DiskStorageService;
 import me.desair.tus.server.util.TusServletRequest;
 import me.desair.tus.server.util.TusServletResponse;
+import me.desair.tus.server.util.Utils;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Strings;
 import org.apache.commons.lang3.Validate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,11 +64,14 @@ public class TusFileUploadService {
   protected void initFeatures() {
     // The order of the features is important
     addTusExtension(new CoreProtocol());
-    addTusExtension(new CreationExtension());
+    CreationExtension creationExtension = new CreationExtension();
+    addTusExtension(creationExtension);
+    addTusExtension(new CreationWithUploadExtension(creationExtension));
     addTusExtension(new ChecksumExtension());
     addTusExtension(new TerminationExtension());
     addTusExtension(new ExpirationExtension());
     addTusExtension(new ConcatenationExtension());
+    addTusExtension(new CorsExtension());
   }
 
   /**
@@ -104,7 +111,7 @@ public class TusFileUploadService {
    * @return The current service
    */
   public TusFileUploadService withUploadIdFactory(UploadIdFactory uploadIdFactory) {
-    Validate.notNull(uploadIdFactory, "The UploadIdFactory cannot be null");
+    Objects.requireNonNull(uploadIdFactory, "The UploadIdFactory cannot be null");
     String previousUploadUri = this.idFactory.getUploadUri();
     this.idFactory = uploadIdFactory;
     this.idFactory.setUploadUri(previousUploadUri);
@@ -121,7 +128,7 @@ public class TusFileUploadService {
    * @return The current service
    */
   public TusFileUploadService withUploadStorageService(UploadStorageService uploadStorageService) {
-    Validate.notNull(uploadStorageService, "The UploadStorageService cannot be null");
+    Objects.requireNonNull(uploadStorageService, "The UploadStorageService cannot be null");
     // Copy over any previous configuration
     uploadStorageService.setMaxUploadSize(this.uploadStorageService.getMaxUploadSize());
     uploadStorageService.setUploadExpirationPeriod(
@@ -142,7 +149,7 @@ public class TusFileUploadService {
    * @return The current service
    */
   public TusFileUploadService withUploadLockingService(UploadLockingService uploadLockingService) {
-    Validate.notNull(uploadLockingService, "The UploadStorageService cannot be null");
+    Objects.requireNonNull(uploadLockingService, "The UploadStorageService cannot be null");
     uploadLockingService.setIdFactory(this.idFactory);
     // Update the upload storage service
     this.uploadLockingService = uploadLockingService;
@@ -216,6 +223,17 @@ public class TusFileUploadService {
   }
 
   /**
+   * Enable or disable duplicate file processing based on checksum hash.
+   *
+   * @param isEnabled True if duplicate file processing should be enabled, false otherwise
+   * @return The current service
+   */
+  public TusFileUploadService withUploadDeduplication(boolean isEnabled) {
+    this.uploadStorageService.setUploadDeduplicationEnabled(isEnabled);
+    return this;
+  }
+
+  /**
    * Add a custom (application-specific) extension that implements the {@link
    * me.desair.tus.server.TusExtension} interface. For example you can add your own extension that
    * checks authentication and authorization policies within your application for the user doing the
@@ -225,7 +243,7 @@ public class TusFileUploadService {
    * @return The current service
    */
   public TusFileUploadService addTusExtension(TusExtension feature) {
-    Validate.notNull(feature, "A custom feature cannot be null");
+    Objects.requireNonNull(feature, "A custom feature cannot be null");
     enabledFeatures.put(feature.getName(), feature);
     updateSupportedHttpMethods();
     return this;
@@ -240,12 +258,20 @@ public class TusFileUploadService {
    * @return The current service
    */
   public TusFileUploadService disableTusExtension(String extensionName) {
-    Validate.notNull(extensionName, "The extension name cannot be null");
+    Objects.requireNonNull(extensionName, "The extension name cannot be null");
     Validate.isTrue(
-        !StringUtils.equals("core", extensionName), "The core protocol cannot be disabled");
+        !Strings.CS.equals("core", extensionName), "The core protocol cannot be disabled");
 
     enabledFeatures.remove(extensionName);
     updateSupportedHttpMethods();
+
+    if (Strings.CS.equals("creation-with-upload", extensionName)) {
+      TusExtension creation = enabledFeatures.get("creation");
+      if (creation instanceof CreationExtension) {
+        ((CreationExtension) creation).setCreationWithUploadEnabled(false);
+      }
+    }
+
     return this;
   }
 
@@ -295,8 +321,8 @@ public class TusFileUploadService {
   public void process(
       HttpServletRequest servletRequest, HttpServletResponse servletResponse, String ownerKey)
       throws IOException {
-    Validate.notNull(servletRequest, "The HTTP Servlet request cannot be null");
-    Validate.notNull(servletResponse, "The HTTP Servlet response cannot be null");
+    Objects.requireNonNull(servletRequest, "The HTTP Servlet request cannot be null");
+    Objects.requireNonNull(servletResponse, "The HTTP Servlet response cannot be null");
 
     HttpMethod method = HttpMethod.getMethodIfSupported(servletRequest, supportedHttpMethods);
 
@@ -305,15 +331,46 @@ public class TusFileUploadService {
 
     TusServletRequest request =
         new TusServletRequest(servletRequest, isChunkedTransferDecodingEnabled);
+    request.setAttribute("me.desair.tus.uploadLockingService", uploadLockingService);
     TusServletResponse response = new TusServletResponse(servletResponse);
 
-    try (UploadLock lock = uploadLockingService.lockUploadByUri(request.getRequestURI())) {
+    try (UploadLock lock = acquireUploadLock(method, request.getRequestURI())) {
 
       processLockedRequest(method, request, response, ownerKey);
 
     } catch (TusException e) {
       log.error("Unable to lock upload for request URI " + request.getRequestURI(), e);
+      response.sendError(e.getStatus(), e.getMessage());
     }
+  }
+
+  protected UploadLock acquireUploadLock(HttpMethod method, String requestUri)
+      throws TusException, IOException {
+    UploadLock lock = null;
+    int retries = 0;
+    while (retries < 25) {
+      try {
+        lock = uploadLockingService.lockUploadByUri(requestUri);
+        break;
+      } catch (TusException e) {
+        if (HttpMethod.HEAD.equals(method) || HttpMethod.DELETE.equals(method)) {
+          uploadLockingService.requestLockRelease(requestUri);
+          retries++;
+          try {
+            Thread.sleep(200L);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Lock acquisition retry interrupted", ie);
+          }
+        } else {
+          throw e;
+        }
+      }
+    }
+    if (lock == null) {
+      lock = uploadLockingService.lockUploadByUri(requestUri);
+    }
+    return lock;
   }
 
   /**
@@ -477,7 +534,8 @@ public class TusFileUploadService {
 
       // Since an error occurred, the bytes we have written are probably not valid. So remove
       // them.
-      UploadInfo uploadInfo = uploadStorageService.getUploadInfo(request.getRequestURI(), ownerKey);
+      UploadInfo uploadInfo =
+          uploadStorageService.getUploadInfo(Utils.getUploadURI(request, response), ownerKey);
       uploadStorageService.removeLastNumberOfBytes(uploadInfo, request.getBytesRead());
 
     } catch (TusException ex) {

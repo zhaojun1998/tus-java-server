@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -24,7 +25,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
+import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.InvalidUploadOffsetException;
 import me.desair.tus.server.exception.UploadNotFoundException;
 import me.desair.tus.server.upload.UploadId;
@@ -72,7 +76,14 @@ public class DiskStorageServiceTest {
   public void setUp() {
     reset(idFactory);
     when(idFactory.getUploadUri()).thenReturn(UPLOAD_URL);
-    when(idFactory.createId()).thenReturn(new UploadId(UUID.randomUUID()));
+    when(idFactory.createId())
+        .then(
+            new Answer<UploadId>() {
+              @Override
+              public UploadId answer(InvocationOnMock invocation) throws Throwable {
+                return new UploadId(UUID.randomUUID());
+              }
+            });
     when(idFactory.readUploadId(nullable(String.class)))
         .then(
             new Answer<UploadId>() {
@@ -506,6 +517,196 @@ public class DiskStorageServiceTest {
     assertFalse(Files.exists(getStoragePath(info.getId())));
   }
 
+  @Test
+  public void testDeduplicationEnabled() throws Exception {
+    storageService.setUploadDeduplicationEnabled(true);
+    assertTrue(storageService.isUploadDeduplicationEnabled());
+  }
+
+  @Test
+  public void testDeduplicationDisabledByDefault() throws Exception {
+    assertFalse(storageService.isUploadDeduplicationEnabled());
+  }
+
+  @Test
+  public void testDeduplicationAndParentChildExpiration() throws Exception {
+    storageService.setUploadDeduplicationEnabled(true);
+
+    // 1. Create parent upload
+    UploadInfo parent = new UploadInfo();
+    parent.setLength(100L);
+    parent.setOffset(100L);
+    parent.setChecksum("parentchecksumvalue");
+    parent.setChecksumAlgorithm(me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    parent = storageService.create(parent, null);
+    // Write dummy data so getBytesPath checks succeed
+    Files.write(getUploadDataPath(parent.getId()), new byte[100]);
+    parent.setOffset(100L);
+    parent.updateExpiration(3600_000L); // 1 hour expiration
+    storageService.update(parent);
+
+    // Verify index lookup finds it
+    UploadInfo resolvedParent =
+        storageService.getUploadInfoByChecksum(
+            "parentchecksumvalue", me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    assertThat(resolvedParent, is(notNullValue()));
+    assertThat(resolvedParent.getId(), is(parent.getId()));
+
+    // 2. Create child upload (duplicate)
+    UploadInfo child = new UploadInfo();
+    child.setLength(100L);
+    child.setOffset(100L);
+    child = storageService.create(child, null);
+
+    // Set duplicatesUploadId
+    child.setDuplicatesUploadId(parent.getId());
+    child.setOffset(100L);
+    child.updateExpiration(7200_000L); // 2 hours expiration (longer than parent)
+    storageService.update(child);
+
+    // Parent should be automatically updated to match child's expiration
+    parent = storageService.getUploadInfo(parent.getId());
+    assertThat(parent.getExpirationTimestamp(), is(child.getExpirationTimestamp()));
+
+    // Child should have no physical data file
+    assertFalse(Files.exists(getUploadDataPath(child.getId())));
+
+    // Check downloading child downloads parent's data
+    try (InputStream is = storageService.getUploadedBytes(child.getId())) {
+      byte[] bytes = IOUtils.toByteArray(is);
+      assertThat(bytes.length, is(100));
+    }
+
+    // Check copyUploadTo
+    try (ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+      storageService.copyUploadTo(child, bos);
+      assertThat(bos.toByteArray().length, is(100));
+    }
+
+    // Test parent termination removes parent index
+    storageService.terminateUpload(parent);
+    resolvedParent =
+        storageService.getUploadInfoByChecksum(
+            "parentchecksumvalue", me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    assertThat(resolvedParent, is(nullValue()));
+  }
+
+  @Test
+  public void testDanglingDeduplicationIndexSelfCleaning() throws Exception {
+    storageService.setUploadDeduplicationEnabled(true);
+
+    UploadInfo parent = new UploadInfo();
+    parent.setLength(100L);
+    parent.setOffset(100L);
+    parent.setChecksum("danglingchecksum");
+    parent.setChecksumAlgorithm(me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    parent = storageService.create(parent, null);
+    Files.write(getUploadDataPath(parent.getId()), new byte[100]);
+    parent.setOffset(100L);
+    storageService.update(parent);
+
+    // Verify indexed
+    UploadInfo resolvedParent =
+        storageService.getUploadInfoByChecksum(
+            "danglingchecksum", me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    assertThat(resolvedParent, is(notNullValue()));
+
+    // Manually delete parent info on disk to simulate expiration/deletion
+    Files.delete(getUploadInfoPath(parent.getId()));
+
+    // Lookup should clean the index and return null
+    resolvedParent =
+        storageService.getUploadInfoByChecksum(
+            "danglingchecksum", me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    assertThat(resolvedParent, is(nullValue()));
+  }
+
+  @Test(expected = UploadNotFoundException.class)
+  public void testGetUploadedBytesChildWhenParentDeleted() throws Exception {
+    // 1. Create parent and child
+    UploadInfo parent = new UploadInfo();
+    parent.setLength(100L);
+    parent.setOffset(100L);
+    parent = storageService.create(parent, null);
+    Files.write(getUploadDataPath(parent.getId()), new byte[100]);
+    parent.setOffset(100L);
+
+    UploadInfo child = new UploadInfo();
+    child.setLength(100L);
+    child.setOffset(100L);
+    child = storageService.create(child, null);
+    child.setDuplicatesUploadId(parent.getId());
+    child.setOffset(100L);
+    storageService.update(child);
+
+    // 2. Delete parent
+    storageService.terminateUpload(parent);
+
+    // 3. Attempt to download child, should throw UploadNotFoundException
+    storageService.getUploadedBytes(child.getId());
+  }
+
+  @Test
+  public void testGetUploadInfoByChecksumNull() throws Exception {
+    assertThat(
+        storageService.getUploadInfoByChecksum(
+            null, me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256),
+        is(nullValue()));
+    assertThat(storageService.getUploadInfoByChecksum("somechecksum", null), is(nullValue()));
+  }
+
+  @Test
+  public void testGetUploadInfoByChecksumMissingDataFile() throws Exception {
+    storageService.setUploadDeduplicationEnabled(true);
+
+    UploadInfo parent = new UploadInfo();
+    parent.setLength(100L);
+    parent.setOffset(100L);
+    parent.setChecksum("missingdatafilechecksum");
+    parent.setChecksumAlgorithm(me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    parent = storageService.create(parent, null);
+    parent.setOffset(100L);
+    storageService.update(parent);
+
+    // Delete the data file but keep the info file
+    Files.delete(getUploadDataPath(parent.getId()));
+
+    // This should clean the index because the data file is missing
+    UploadInfo resolvedParent =
+        storageService.getUploadInfoByChecksum(
+            "missingdatafilechecksum", me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+    assertThat(resolvedParent, is(nullValue()));
+  }
+
+  @Test
+  public void testDeduplicationParentNullExpirationUpdate() throws Exception {
+    storageService.setUploadDeduplicationEnabled(true);
+
+    // Create parent with expiration
+    UploadInfo parent = new UploadInfo();
+    parent.setLength(100L);
+    parent.setOffset(100L);
+    parent = storageService.create(parent, null);
+    Files.write(getUploadDataPath(parent.getId()), new byte[100]);
+    parent.setOffset(100L);
+    parent.updateExpiration(3600_000L); // 1 hour expiration
+    storageService.update(parent);
+
+    // Create child with null expiration
+    UploadInfo child = new UploadInfo();
+    child.setLength(100L);
+    child.setOffset(100L);
+    child = storageService.create(child, null);
+    child.setDuplicatesUploadId(parent.getId());
+    child.setOffset(100L);
+    child.setExpirationTimestamp(null);
+    storageService.update(child);
+
+    // Parent expiration should be nullified to match child
+    parent = storageService.getUploadInfo(parent.getId());
+    assertThat(parent.getExpirationTimestamp(), is(nullValue()));
+  }
+
   private Path getUploadInfoPath(UploadId id) {
     return getStoragePath(id).resolve("info");
   }
@@ -524,7 +725,8 @@ public class DiskStorageServiceTest {
     Path nonExistentPath = Paths.get("target", "tus", "non-existent-" + UUID.randomUUID());
     assertFalse(Files.exists(nonExistentPath));
 
-    DiskStorageService newStorageService = new DiskStorageService(idFactory, nonExistentPath.toString());
+    DiskStorageService newStorageService =
+        new DiskStorageService(idFactory, nonExistentPath.toString());
 
     // This should not throw an exception even if the directory does not exist
     newStorageService.cleanupExpiredUploads(uploadLockingService);
@@ -534,5 +736,92 @@ public class DiskStorageServiceTest {
 
     // Cleanup
     FileUtils.deleteDirectory(nonExistentPath.toFile());
+  }
+
+  @Test
+  public void testGetUploadInfoByChecksumWithUnsafeChecksums() throws Exception {
+    // These values cannot be parsed to non-empty base64 bytes, so they remain unsafe and throw
+    // IOException
+    List<String> unsafeEmptyChecksums = Arrays.asList(" ", "..", "/");
+    for (String checksum : unsafeEmptyChecksums) {
+      assertThrows(
+          IOException.class,
+          () -> {
+            storageService.getUploadInfoByChecksum(
+                checksum, me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+          });
+    }
+
+    // These values contain path traversal characters but are parsed as base64 and converted to safe
+    // hex strings.
+    // They should not throw IOException, but return null since the resolved file does not exist.
+    List<String> unsafeBase64Checksums =
+        Arrays.asList("../test", "test/../test", "test/test", "test\\test");
+    for (String checksum : unsafeBase64Checksums) {
+      assertThat(
+          storageService.getUploadInfoByChecksum(
+              checksum, me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256),
+          is(nullValue()));
+    }
+  }
+
+  @Test
+  public void testUpdateWithUnsafeChecksums() throws Exception {
+    storageService.setUploadDeduplicationEnabled(true);
+
+    UploadInfo info = new UploadInfo();
+    info.setLength(100L);
+    info.setOffset(100L);
+    info = storageService.create(info, null);
+    info.setOffset(100L);
+
+    // Using an empty/unsafe value that fails base64 parsing and remains unsafe
+    info.setChecksum(" / ");
+    info.setChecksumAlgorithm(me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+
+    final UploadInfo finalInfo = info;
+    assertThrows(
+        IOException.class,
+        () -> {
+          storageService.update(finalInfo);
+        });
+  }
+
+  @Test
+  public void testTerminateUploadWithUnsafeChecksums() throws Exception {
+    UploadInfo info = new UploadInfo();
+    info.setId(new UploadId("test-id"));
+    info.setChecksum(" / ");
+    info.setChecksumAlgorithm(me.desair.tus.server.checksum.ChecksumAlgorithm.SHA256);
+
+    assertThrows(
+        IOException.class,
+        () -> {
+          storageService.terminateUpload(info);
+        });
+  }
+
+  @Test
+  public void testGetUploadInfoByChecksumWithNullValues() throws Exception {
+    // 1. null checksum should return null
+    assertThat(
+        storageService.getUploadInfoByChecksum(null, ChecksumAlgorithm.SHA256), is(nullValue()));
+
+    // 2. null algorithm should return null
+    assertThat(
+        storageService.getUploadInfoByChecksum(
+            "ba7816bc4335da0d4435913c04792c254db9c9363b8968b92b2313fa1d01f98b", null),
+        is(nullValue()));
+  }
+
+  @Test
+  public void testGetUploadInfoByChecksumWithValidBase64ContainingSlash() throws Exception {
+    // Valid SHA-256 base64 representation digest containing a slash:
+    // "E0/isChYLiH9/ph8pn/+F6EyUQ+PCZTi8epGL3cuQW0=" (length 44, decodes to 32 bytes)
+    // It should be decoded to hex (which is safe) and successfully resolved (returning null).
+    assertThat(
+        storageService.getUploadInfoByChecksum(
+            "E0/isChYLiH9/ph8pn/+F6EyUQ+PCZTi8epGL3cuQW0=", ChecksumAlgorithm.SHA256),
+        is(nullValue()));
   }
 }

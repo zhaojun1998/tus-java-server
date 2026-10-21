@@ -11,12 +11,14 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import me.desair.tus.server.checksum.ChecksumAlgorithm;
 import me.desair.tus.server.exception.InvalidUploadOffsetException;
 import me.desair.tus.server.exception.TusException;
 import me.desair.tus.server.exception.UploadNotFoundException;
@@ -29,8 +31,8 @@ import me.desair.tus.server.upload.UploadType;
 import me.desair.tus.server.upload.concatenation.UploadConcatenationService;
 import me.desair.tus.server.upload.concatenation.VirtualConcatenationService;
 import me.desair.tus.server.util.Utils;
+import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang3.Validate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,6 +49,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   private Long uploadExpirationPeriod = null;
   private UploadIdFactory idFactory;
   private UploadConcatenationService uploadConcatenationService;
+  private boolean isUploadDeduplicationEnabled = false;
 
   public DiskStorageService(String storagePath) {
     super(storagePath + File.separator + UPLOAD_SUB_DIRECTORY);
@@ -55,13 +58,13 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
 
   public DiskStorageService(UploadIdFactory idFactory, String storagePath) {
     this(storagePath);
-    Validate.notNull(idFactory, "The IdFactory cannot be null");
+    Objects.requireNonNull(idFactory, "The IdFactory cannot be null");
     this.idFactory = idFactory;
   }
 
   @Override
   public void setIdFactory(UploadIdFactory idFactory) {
-    Validate.notNull(idFactory, "The IdFactory cannot be null");
+    Objects.requireNonNull(idFactory, "The IdFactory cannot be null");
     this.idFactory = idFactory;
   }
 
@@ -73,6 +76,47 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   @Override
   public long getMaxUploadSize() {
     return maxUploadSize == null ? 0 : maxUploadSize;
+  }
+
+  @Override
+  public void setUploadDeduplicationEnabled(boolean enabled) {
+    this.isUploadDeduplicationEnabled = enabled;
+  }
+
+  @Override
+  public boolean isUploadDeduplicationEnabled() {
+    return this.isUploadDeduplicationEnabled;
+  }
+
+  @Override
+  public UploadInfo getUploadInfoByChecksum(String checksum, ChecksumAlgorithm algorithm)
+      throws IOException {
+    if (checksum == null || algorithm == null) {
+      return null;
+    }
+    Path checksumFile = getChecksumPath(checksum, algorithm);
+    if (Files.exists(checksumFile)) {
+      String uploadIdStr =
+          new String(Files.readAllBytes(checksumFile), StandardCharsets.UTF_8).trim();
+      UploadId id = new UploadId(uploadIdStr);
+      UploadInfo info = getUploadInfo(id);
+      if (info == null) {
+        Files.deleteIfExists(checksumFile);
+        return null;
+      }
+      Path bytesPath = null;
+      try {
+        bytesPath = getPathInUploadDir(id, DATA_FILE);
+      } catch (UploadNotFoundException e) {
+        // file doesn't exist
+      }
+      if (bytesPath == null || !Files.exists(bytesPath)) {
+        Files.deleteIfExists(checksumFile);
+        return null;
+      }
+      return info;
+    }
+    return null;
   }
 
   @Override
@@ -89,6 +133,9 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   public UploadInfo getUploadInfo(UploadId id) throws IOException {
     try {
       Path infoPath = getInfoPath(id);
+      if (infoPath == null || !Files.exists(infoPath)) {
+        return null;
+      }
       return Utils.readSerializable(infoPath, UploadInfo.class);
     } catch (UploadNotFoundException e) {
       return null;
@@ -129,8 +176,60 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
 
   @Override
   public void update(UploadInfo uploadInfo) throws IOException, UploadNotFoundException {
-    Path infoPath = getInfoPath(uploadInfo.getId());
-    Utils.writeSerializable(uploadInfo, infoPath);
+    if (uploadInfo != null) {
+      if (uploadInfo.getDuplicatesUploadId() != null) {
+        // Delete the child's own data file if it exists
+        try {
+          Path childDataPath = getPathInUploadDir(uploadInfo.getId(), DATA_FILE);
+          Files.deleteIfExists(childDataPath);
+        } catch (UploadNotFoundException e) {
+          // It doesn't exist yet, which is fine
+        }
+
+        // Retrieve the parent UploadInfo
+        UploadId parentId = uploadInfo.getDuplicatesUploadId();
+        UploadInfo parentInfo = getUploadInfo(parentId);
+        if (parentInfo != null) {
+          Path parentBytesPath = null;
+          try {
+            parentBytesPath = getPathInUploadDir(parentId, DATA_FILE);
+          } catch (UploadNotFoundException e) {
+            // Parent file is not found
+          }
+
+          if (parentBytesPath != null && Files.exists(parentBytesPath)) {
+            // Ensure parent's expiration timestamp is >= child's expiration timestamp
+            Long childExpire = uploadInfo.getExpirationTimestamp();
+            Long parentExpire = parentInfo.getExpirationTimestamp();
+            if (childExpire == null) {
+              if (parentExpire != null) {
+                parentInfo.setExpirationTimestamp(null);
+                Path parentInfoPath = getInfoPath(parentId);
+                Utils.writeSerializable(parentInfo, parentInfoPath);
+              }
+            } else {
+              if (parentExpire != null && parentExpire < childExpire) {
+                parentInfo.setExpirationTimestamp(childExpire);
+                Path parentInfoPath = getInfoPath(parentId);
+                Utils.writeSerializable(parentInfo, parentInfoPath);
+              }
+            }
+          }
+        }
+      } else if (isUploadDeduplicationEnabled()
+          && !uploadInfo.isUploadInProgress()
+          && uploadInfo.getChecksum() != null
+          && uploadInfo.getChecksumAlgorithm() != null) {
+        // Index the checksum
+        Path checksumFile =
+            getChecksumPath(uploadInfo.getChecksum(), uploadInfo.getChecksumAlgorithm());
+        Files.createDirectories(checksumFile.getParent());
+        Files.write(checksumFile, uploadInfo.getId().toString().getBytes(StandardCharsets.UTF_8));
+      }
+
+      Path infoPath = getInfoPath(uploadInfo.getId());
+      Utils.writeSerializable(uploadInfo, infoPath);
+    }
   }
 
   @Override
@@ -202,6 +301,12 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   @Override
   public void terminateUpload(UploadInfo info) throws UploadNotFoundException, IOException {
     if (info != null) {
+      if (info.getDuplicatesUploadId() == null
+          && info.getChecksum() != null
+          && info.getChecksumAlgorithm() != null) {
+        Path checksumFile = getChecksumPath(info.getChecksum(), info.getChecksumAlgorithm());
+        Files.deleteIfExists(checksumFile);
+      }
       Path uploadPath = getPathInStorageDirectory(info.getId());
       FileUtils.deleteDirectory(uploadPath.toFile());
     }
@@ -219,7 +324,7 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
 
   @Override
   public void setUploadConcatenationService(UploadConcatenationService concatenationService) {
-    Validate.notNull(concatenationService);
+    Objects.requireNonNull(concatenationService);
     this.uploadConcatenationService = concatenationService;
   }
 
@@ -247,6 +352,14 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
   public InputStream getUploadedBytes(UploadId id) throws IOException, UploadNotFoundException {
     InputStream inputStream = null;
     UploadInfo uploadInfo = getUploadInfo(id);
+    if (uploadInfo == null) {
+      throw new UploadNotFoundException("The upload with id " + id + " was not found.");
+    }
+
+    if (uploadInfo.getDuplicatesUploadId() != null) {
+      return getUploadedBytes(uploadInfo.getDuplicatesUploadId());
+    }
+
     if (UploadType.CONCATENATED.equals(uploadInfo.getUploadType())
         && uploadConcatenationService != null) {
       inputStream = uploadConcatenationService.getConcatenatedBytes(uploadInfo);
@@ -255,6 +368,10 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
       Path bytesPath = getBytesPath(id);
       // If bytesPath is not null, we know this is a valid Upload URI
       if (bytesPath != null) {
+        if (!Files.exists(bytesPath)) {
+          throw new UploadNotFoundException(
+              "The upload bytes for id " + id + " could not be found.");
+        }
         inputStream = Channels.newInputStream(FileChannel.open(bytesPath, READ));
       }
     }
@@ -280,7 +397,15 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
               upload.getId());
 
         } else {
-          Path bytesPath = getBytesPath(upload.getId());
+          UploadId readId =
+              upload.getDuplicatesUploadId() != null
+                  ? upload.getDuplicatesUploadId()
+                  : upload.getId();
+          Path bytesPath = getBytesPath(readId);
+          if (!Files.exists(bytesPath)) {
+            throw new UploadNotFoundException(
+                "The upload bytes for id " + readId + " could not be found.");
+          }
           try (FileChannel file = FileChannel.open(bytesPath, READ)) {
             // Efficiently copy the bytes to the output stream
             file.transferTo(0, upload.getLength(), outputChannel);
@@ -324,6 +449,42 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
     return getPathInUploadDir(id, INFO_FILE);
   }
 
+  private Path getChecksumPath(String checksum, ChecksumAlgorithm algorithm) throws IOException {
+    String filename = checksum;
+    if (filename != null) {
+      if (!filename.matches("^[0-9a-fA-F]+$")) {
+        byte[] bytes = Base64.decodeBase64(filename);
+        if (bytes != null && bytes.length > 0) {
+          StringBuilder sb = new StringBuilder();
+          for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+          }
+          filename = sb.toString();
+        }
+      }
+    }
+
+    if (!isSafePathComponent(filename)) {
+      throw new IOException("The checksum contains an unsafe value.");
+    }
+    if (!isSafePathComponent(algorithm.toString())) {
+      throw new IOException("The checksum algorithm contains an unsafe value.");
+    }
+    return getStoragePath()
+        .getParent()
+        .resolve("checksums")
+        .resolve(algorithm.toString())
+        .resolve(filename);
+  }
+
+  private boolean isSafePathComponent(String component) {
+    return component != null
+        && !component.trim().isEmpty()
+        && !component.contains("/")
+        && !component.contains("\\")
+        && !component.contains("..");
+  }
+
   private Path createUploadDirectory(UploadId id) throws IOException {
     return Files.createDirectories(getPathInStorageDirectory(id));
   }
@@ -332,6 +493,9 @@ public class DiskStorageService extends AbstractDiskBasedService implements Uplo
     // Get the upload directory
     Path uploadDir = getPathInStorageDirectory(id);
     if (uploadDir != null && Files.exists(uploadDir)) {
+      if (!isSafePathComponent(fileName)) {
+        throw new IllegalArgumentException("The file name contains an unsafe value.");
+      }
       return uploadDir.resolve(fileName);
     } else {
       throw new UploadNotFoundException("The upload for id " + id + " was not found.");

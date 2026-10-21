@@ -73,4 +73,19 @@ public class PostEmptyRequestValidatorTest {
 
     // Expect a InvalidContentLengthException
   }
+
+  @Test
+  public void validateContentLengthNotZeroWithCreationWithUpload() throws Exception {
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 10L);
+    validator.setCreationWithUploadEnabled(true);
+
+    // When we validate the request
+    try {
+      validator.validate(HttpMethod.POST, servletRequest, null, null);
+    } catch (Exception ex) {
+      fail();
+    }
+
+    // No Exception is thrown
+  }
 }
