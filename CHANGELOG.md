@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-3.3-zfile.2]
+
+### Changed
+- Appended bytes are collected into 256 KiB blocks before each write to the data file instead of being copied by `FileChannel.transferFrom`, which wrote every few kilobytes received from the servlet container. A single large upload is no longer limited by one CPU core.
+
 ## [1.0.0-3.3-zfile.1]
 
 ### Added

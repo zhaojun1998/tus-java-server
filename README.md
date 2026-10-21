@@ -11,6 +11,7 @@ This is a fork of [tus-java-server](https://github.com/tomdesair/tus-java-server
 5. **Lock wait for application calls**: `withUploadLockWaitTimeout(Duration)` lets `getUploadInfo`, `getUploadedBytes`, `getUploadedFile` and `deleteUpload` wait for a locked upload. Requests that cannot lock their upload are logged as warnings.
 6. **Local file of a completed upload**: `getUploadedFile(String, String)` returns the data file of a completed upload so it can be moved instead of copied.
 7. **Fixed dependency versions**: dependencies use fixed versions instead of version ranges.
+8. **Block writes on append**: request bytes are collected into 256 KiB blocks before each write to the data file, reducing write calls for large uploads.
 
 ## Usage with JitPack
 
