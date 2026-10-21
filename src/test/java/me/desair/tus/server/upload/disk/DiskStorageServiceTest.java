@@ -324,6 +324,19 @@ public class DiskStorageServiceTest {
   }
 
   @Test
+  public void appendWithoutDataSync() throws Exception {
+    storageService.setUploadDataSyncEnabled(false);
+    UploadInfo info = new UploadInfo();
+    info.setLength(8L);
+    info = storageService.create(info, null);
+
+    storageService.append(info, IOUtils.toInputStream("complete", StandardCharsets.UTF_8));
+
+    assertThat(Files.readString(getUploadDataPath(info.getId())), is("complete"));
+    assertThat(storageService.getUploadInfo(info.getId()).getOffset(), is(8L));
+  }
+
+  @Test
   public void getUploadInfoAlignsOffsetWithShorterData() throws Exception {
     // Bytes acknowledged without data sync can be lost on a power failure while the info file
     // still records them, which would otherwise report the upload as completed
@@ -411,6 +424,9 @@ public class DiskStorageServiceTest {
         () -> storageService.getUploadedFile(inProgressUri, "foo"));
     assertThrows(
         UploadNotFoundException.class, () -> storageService.getUploadedFile(completedUri, "bar"));
+    assertThrows(
+        UploadNotFoundException.class,
+        () -> storageService.getUploadedFile(UPLOAD_URL + "/" + UUID.randomUUID(), "foo"));
     Files.delete(getUploadDataPath(completed.getId()));
     assertThrows(
         UploadNotFoundException.class, () -> storageService.getUploadedFile(completedUri, "foo"));

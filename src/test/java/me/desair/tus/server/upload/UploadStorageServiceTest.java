@@ -127,4 +127,23 @@ public class UploadStorageServiceTest {
         dummyStorageService.getUploadInfoByChecksum("some-checksum", ChecksumAlgorithm.SHA256),
         is(nullValue()));
   }
+
+  @Test
+  public void testDefaultUploadDataSyncCannotBeDisabled() {
+    dummyStorageService.setUploadDataSyncEnabled(false);
+
+    assertThat(dummyStorageService.isUploadDataSyncEnabled(), is(true));
+  }
+
+  @Test
+  public void testDefaultCompletedUploadExpirationCannotBeEnabled() {
+    dummyStorageService.setCompletedUploadExpirationEnabled(true);
+
+    assertThat(dummyStorageService.isCompletedUploadExpirationEnabled(), is(false));
+  }
+
+  @Test
+  public void testDefaultGetUploadedFile() throws Exception {
+    assertThat(dummyStorageService.getUploadedFile("/files/test", null), is(nullValue()));
+  }
 }

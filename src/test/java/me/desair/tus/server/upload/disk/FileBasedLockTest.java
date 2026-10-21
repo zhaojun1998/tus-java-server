@@ -3,14 +3,18 @@ package me.desair.tus.server.upload.disk;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.withSettings;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -162,6 +166,65 @@ public class FileBasedLockTest {
     } catch (IOException expected) {
       assertFalse(channel.get().isOpen());
     }
+  }
+
+  @Test
+  public void testChannelIsClosedWhenWritingTheLockFileFails() throws Exception {
+    UUID test = UUID.randomUUID();
+    AtomicReference<FileChannel> channel = new AtomicReference<>();
+    try {
+      new FileBasedLock("/test/upload/" + test, storagePath.resolve(test.toString())) {
+        @Override
+        protected FileChannel createFileChannel() throws IOException {
+          FileChannel spy = createFileChannelMock();
+          doReturn(mock(FileLock.class)).when(spy).tryLock(anyLong(), anyLong(), anyBoolean());
+          doThrow(new IOException("write failed")).when(spy).truncate(anyLong());
+          channel.set(spy);
+          return spy;
+        }
+      };
+      fail("Locking must fail");
+    } catch (IOException expected) {
+      assertFalse(channel.get().isOpen());
+    }
+  }
+
+  @Test(expected = UploadAlreadyLockedException.class)
+  public void testLockFailsWhenTheLockPathIsNeverOwned() throws Exception {
+    UUID test = UUID.randomUUID();
+    Path path = storagePath.resolve(test.toString());
+
+    // Every opened lock file is unlinked before it is locked, as if other holders kept releasing it
+    new FileBasedLock("/test/upload/" + test, path) {
+      @Override
+      protected FileChannel createFileChannel() throws IOException {
+        FileChannel channel = super.createFileChannel();
+        Files.delete(path);
+        return channel;
+      }
+    };
+  }
+
+  @Test(expected = UploadAlreadyLockedException.class)
+  public void testFailingCloseDoesNotHideTheLockResult() throws Exception {
+    UUID test = UUID.randomUUID();
+    new FileBasedLock("/test/upload/" + test, storagePath.resolve(test.toString())) {
+      @Override
+      protected FileChannel createFileChannel() {
+        // tryLock returns null as when another process holds the lock, and closing fails
+        return mock(
+            FileChannel.class,
+            withSettings()
+                .useConstructor()
+                .defaultAnswer(
+                    invocation -> {
+                      if ("implCloseChannel".equals(invocation.getMethod().getName())) {
+                        throw new IOException("close failed");
+                      }
+                      return RETURNS_DEFAULTS.answer(invocation);
+                    }));
+      }
+    };
   }
 
   private FileChannel createFileChannelMock() throws IOException {
