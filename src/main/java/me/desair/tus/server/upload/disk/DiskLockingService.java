@@ -88,8 +88,9 @@ public class DiskLockingService extends AbstractDiskBasedService implements Uplo
               Files.deleteIfExists(path);
             } else {
               UploadId id = new UploadId(fileName);
+              // Probing the lock deletes the lock file when nobody holds it; deleting the path
+              // afterwards could remove a lock file a new request created in the meantime.
               if (!isLocked(id)) {
-                Files.deleteIfExists(path);
                 Files.deleteIfExists(path.resolveSibling(fileName + ".stop"));
               }
             }
