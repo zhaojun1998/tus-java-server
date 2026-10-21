@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-3.3-zfile.1]
+
+### Added
+- **Optional Data Sync**: `withUploadDataSync(boolean)` controls whether appended bytes are forced to the storage device after each request (default: `true`).
+- **Expiration of Completed Uploads**: `withCompletedUploadExpiration(boolean)` lets `cleanup()` also remove completed uploads whose expiration timestamp has passed (default: `false`).
+- **Lock Wait for Application Calls**: `withUploadLockWaitTimeout(Duration)` lets `getUploadInfo`, `getUploadedBytes`, `getUploadedFile` and `deleteUpload` wait for a locked upload instead of failing immediately (default: zero).
+- **Local File of a Completed Upload**: `getUploadedFile(String, String)` returns the data file of a completed upload so it can be moved instead of copied.
+- `UploadLockingService#lockUpload(UploadId)` default method to lock an upload by its ID, implemented by `DiskLockingService`.
+
+### Changed
+- The offset read from disk is aligned with the size of the data file, so an upload whose bytes or upload information were lost resumes from the bytes actually stored.
+- `cleanup()` deletes expired uploads while holding their upload lock and removes upload directories without readable upload information once nothing in them was modified during the upload expiration period.
+- Requests that cannot lock their upload are logged as warnings without a stack trace.
+- Dependencies use fixed versions instead of version ranges.
+
+### Fixes
+- Upload information files are replaced atomically, so a concurrent reader can no longer leave them empty.
+- File based locks stay exclusive when the lock file is deleted while another request opens it.
+
 ## [1.0.0-3.3]
 
 ### Added

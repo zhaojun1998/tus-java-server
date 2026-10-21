@@ -2,12 +2,15 @@
 
 # tus-java-server
 
-This is a fork of [tus-java-server](https://github.com/tomdesair/tus-java-server) with the following enhancements:
+This is a fork of [tus-java-server](https://github.com/tomdesair/tus-java-server) based on release 1.0.0-3.3, with the following changes:
 
-1. **Issue #39 fix**: Ensure storage directory exists before cleanup operations
-2. **Issue #34 fix**: Handle corrupted upload info files gracefully
-3. **Lock retry mechanism**: Configurable retry for lock acquisition to handle DELETE/PATCH race conditions
-4. **Security fixes**: Updated dependencies to fix CVE-2024-47554 (commons-io), CVE-2025-48924 (commons-lang3), CVE-2024-38816 (Spring Framework)
+1. **Atomic upload information writes**: upload information is written to a temporary file that replaces the previous file, so readers never see a truncated file.
+2. **Exclusive file based locks**: a request that locks a lock file which the previous holder just deleted retries on the file at the lock path, and a lock only deletes the lock file it still owns.
+3. **Optional data sync**: `withUploadDataSync(false)` skips forcing appended bytes to the storage device after each request. The offset of an upload is aligned with the bytes actually stored whenever it is read.
+4. **Expiration of completed and abandoned uploads**: `withCompletedUploadExpiration(true)` lets `cleanup()` also remove expired completed uploads, and upload directories without readable upload information are removed once nothing in them was modified during the expiration period. Expired uploads are deleted while holding their upload lock.
+5. **Lock wait for application calls**: `withUploadLockWaitTimeout(Duration)` lets `getUploadInfo`, `getUploadedBytes`, `getUploadedFile` and `deleteUpload` wait for a locked upload. Requests that cannot lock their upload are logged as warnings.
+6. **Local file of a completed upload**: `getUploadedFile(String, String)` returns the data file of a completed upload so it can be moved instead of copied.
+7. **Fixed dependency versions**: dependencies use fixed versions instead of version ranges.
 
 ## Usage with JitPack
 
@@ -79,6 +82,9 @@ The first step is to create a `TusFileUploadService` object using its constructo
 * `withChunkedTransferDecoding`: You can enable or disable the decoding of chunked HTTP requests by this library. Enable this feature in case the web container in which this service is running does not decode chunked transfers itself. By default, chunked decoding via this library is disabled (as modern frameworks tend to already do this for you).
 * `withThreadLocalCache(Boolean)`: Optionally you can enable (or disable) an in-memory (thread local) cache of upload request data to reduce load on the storage backend and potentially increase performance when processing upload requests.
 * `withUploadExpirationPeriod(Long)`: You can set the number of milliseconds after which an upload is considered as expired and available for cleanup.
+* `withCompletedUploadExpiration(boolean)`: Let `cleanup()` also remove completed uploads whose expiration timestamp has passed. Disabled by default, so completed uploads are kept until `deleteUpload` is called. Enable it when completed uploads are moved elsewhere and deleted afterwards, so uploads that were never deleted, for example because the application stopped first, are removed eventually.
+* `withUploadDataSync(boolean)`: Force appended bytes to the storage device before a request that uploads data completes. Enabled by default. Disabling it removes one synchronous flush per `PATCH` request; bytes acknowledged shortly before a power failure can then be lost, and the client resumes from the bytes that were actually stored.
+* `withUploadLockWaitTimeout(Duration)`: Set how long `getUploadInfo`, `getUploadedBytes`, `getUploadedFile` and `deleteUpload` wait for an upload that is locked by a request. The default of zero fails immediately with an `UploadAlreadyLockedException`. These methods never interrupt the request that holds the lock.
 * `withDownloadFeature()`: Enable the unofficial `download` extension that also allows you to download uploaded bytes.
 * `withUploadDeduplication(Boolean)`: Enable duplicate file processing based on the checksum hash. If enabled, the server will scan previous completed uploads for a file with the same checksum. If a duplicate is found, the new upload will link to the existing file (`duplicatesUploadId`), skipping redundant disk storage writes and saving disk space.
   * **Disclaimer**: If duplicate file processing is enabled, the duplicate (child) upload depends directly on the original (parent) upload file. If the original parent upload is deleted or terminated, any duplicate child uploads pointing to it will no longer be downloadable (returning `404 Not Found`).
@@ -97,12 +103,14 @@ Optionally you can also pass a `String ownerKey` parameter. The `ownerKey` can b
 ### 3. Retrieving the uploaded bytes and metadata within the application
 Once the upload has been completed by the user, the business logic layer of your application needs to retrieve and do something with the uploaded bytes. For example it could read the contents of the file, or move the uploaded bytes to their final persistent storage location. Retrieving the uploaded bytes in the backend can be achieved by using the `me.desair.tus.server.TusFileUploadService.getUploadedBytes(String uploadUrl)` method. The passed `uploadUrl` value should be the upload url used by the client to which the file was uploaded. Therefor your application should pass the upload URL of completed uploads to the backend. Optionally, you can also pass an `ownerKey` value to this method in case your application chooses to process uploads using owner keys. Examples of values that can be used as an `ownerKey` are: an internal user identifier, a session ID, the name of the subpart of your application...
 
+If the bytes are moved to a local file system, `me.desair.tus.server.TusFileUploadService.getUploadedFile(String uploadUrl, String ownerKey)` returns the file that holds the bytes of a completed upload, so the application can move it instead of copying it. The file may only be moved when the upload is deleted afterwards. Concatenated and deduplicated uploads have no such file, in which case the method returns `null`.
+
 Using the `me.desair.tus.server.TusFileUploadService.getUploadInfo(String uploadUrl)` method you can retrieve metadata about a specific upload process. This includes metadata provided by the client as well as metadata kept by the library like creation timestamp, creator ip-address list, upload length... The method `UploadInfo.getId()` will return the unique identifier of this upload encapsulated in an `UploadId` instance. The original (custom generated) identifier object of this upload can be retrieved using `UploadId.getOriginalObject()`. A URL safe string representation of the identifier is returned by `UploadId.toString()`. It is highly recommended to consult the [JavaDoc of both classes](https://tus.desair.me/).
 
 ### 4. Upload cleanup
 After having processed the uploaded bytes on the server backend (e.g. copy them to their final persistent location), it's important to cleanup the (temporary) uploaded bytes. This can be done by calling the `me.desair.tus.server.TusFileUploadService.deleteUpload(String uploadUri)` method. This will remove the uploaded bytes and any associated upload information from the storage backend. Alternatively, a client can also remove an (in-progress) upload using the [termination extension](https://tus.io/protocols/resumable-upload.html#termination).
 
-Next to removing uploads after they have been completed and processed by the backend, it is also recommended to schedule a regular maintenance task to clean up any expired uploads or locks. Cleaning up expired uploads and locks can be achieved using the `me.desair.tus.server.TusFileUploadService.cleanup()` method.
+Next to removing uploads after they have been completed and processed by the backend, it is also recommended to schedule a regular maintenance task to clean up any expired uploads or locks. Cleaning up expired uploads and locks can be achieved using the `me.desair.tus.server.TusFileUploadService.cleanup()` method. It removes expired uploads that are still in progress, expired completed uploads when `withCompletedUploadExpiration(true)` is set, and upload directories without readable upload information that were not modified during the upload expiration period.
 
 ## Compatible Client Implementations
 This tus protocol implementation has been [tested](https://github.com/tomdesair/tus-java-server-spring-demo) with the [Uppy file upload client](https://uppy.io/). This repository also contains [many automated integration tests](https://github.com/tomdesair/tus-java-server/blob/master/src/test/java/me/desair/tus/server/ITTusFileUploadService.java) that validate the tus protocol server implementation using plain HTTP requests. So in theory this means we're compatible with any tus 1.0.0 compliant client.
