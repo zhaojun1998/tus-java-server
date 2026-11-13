@@ -4,11 +4,14 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.Assert.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
 import java.io.Serializable;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -16,13 +19,20 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import me.desair.tus.server.HttpHeader;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
+import me.desair.tus.server.upload.UploadId;
+import me.desair.tus.server.upload.UploadInfo;
+import me.desair.tus.server.upload.UploadType;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.SystemUtils;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -54,6 +64,65 @@ public class UtilsTest {
     assertThat(result.getValue(), is("test-value"));
 
     Files.deleteIfExists(testFile);
+  }
+
+  @Test
+  public void readSerializableRejectsUnexpectedNestedClassBeforeItsCallback() throws Exception {
+    Path testFile = storagePath.resolve("unexpected-class");
+    UploadInfo info = new UploadInfo();
+    info.setId(new UploadId(new UnexpectedSerializable()));
+    Utils.writeSerializable(info, testFile);
+
+    assertThat(Utils.readSerializable(testFile, UploadInfo.class), is(nullValue()));
+  }
+
+  @Test
+  public void readSerializableRejectsUnexpectedJdkClass() throws Exception {
+    Path testFile = storagePath.resolve("unexpected-jdk-class");
+    UploadInfo info = new UploadInfo();
+    info.setId(new UploadId(new AtomicInteger(7)));
+    Utils.writeSerializable(info, testFile);
+
+    assertThat(Utils.readSerializable(testFile, UploadInfo.class), is(nullValue()));
+  }
+
+  @Test
+  public void readSerializableWithLegacyUploadInfo() throws Exception {
+    Path testFile = storagePath.resolve("legacy-info");
+    try (InputStream input =
+        UtilsTest.class.getResourceAsStream("/serialization/upload-info-zfile.2.ser")) {
+      Files.copy(input, testFile);
+    }
+
+    UploadInfo info = Utils.readSerializable(testFile, UploadInfo.class);
+
+    assertThat(info, is(notNullValue()));
+    assertThat(
+        info.getId().getOriginalObject(),
+        is(UUID.fromString("12345678-1234-1234-1234-123456789abc")));
+    assertThat(info.getUploadType(), is(UploadType.CONCATENATED));
+    assertThat(info.getLength(), is(12L));
+    assertThat(info.getOffset(), is(4L));
+    assertThat(info.getOwnerKey(), is("legacy-owner"));
+    assertThat(info.getFileName(), is("legacy.txt"));
+    assertThat(info.getConcatenationPartIds(), is(Arrays.asList("part-one", "part-two")));
+    assertThat(info.getDuplicatesUploadId().getOriginalObject(), is(42L));
+    assertThat(info.getChecksumAlgorithm(), is(ChecksumAlgorithm.SHA256));
+    assertThat(info.getChecksum(), is("legacy-checksum"));
+  }
+
+  @Test
+  public void readSerializableWithUnmodifiableConcatenationParts() throws Exception {
+    Path testFile = storagePath.resolve("unmodifiable-parts");
+    UploadInfo info = new UploadInfo();
+    info.setConcatenationPartIds(
+        Collections.unmodifiableList(new ArrayList<>(Arrays.asList("part-one", "part-two"))));
+    Utils.writeSerializable(info, testFile);
+
+    UploadInfo result = Utils.readSerializable(testFile, UploadInfo.class);
+
+    assertThat(result, is(notNullValue()));
+    assertThat(result.getConcatenationPartIds(), is(Arrays.asList("part-one", "part-two")));
   }
 
   @Test
@@ -109,10 +178,19 @@ public class UtilsTest {
 
     try (FileChannel reader = FileChannel.open(testFile, StandardOpenOption.READ);
         FileLock ignored = reader.lock(0L, Long.MAX_VALUE, true)) {
-      Utils.writeSerializable(new TestSerializable("new"), testFile);
+      // Windows mandatory locks prevent replacement while this external reader holds its lock.
+      if (SystemUtils.IS_OS_WINDOWS) {
+        assertThrows(
+            IOException.class,
+            () -> Utils.writeSerializable(new TestSerializable("new"), testFile));
+      } else {
+        Utils.writeSerializable(new TestSerializable("new"), testFile);
+      }
     }
 
-    assertThat(Utils.readSerializable(testFile, TestSerializable.class).getValue(), is("new"));
+    assertThat(
+        Utils.readSerializable(testFile, TestSerializable.class).getValue(),
+        is(SystemUtils.IS_OS_WINDOWS ? "old" : "new"));
     Files.deleteIfExists(testFile);
   }
 
@@ -123,7 +201,13 @@ public class UtilsTest {
 
     try (FileChannel writer = FileChannel.open(testFile, StandardOpenOption.WRITE);
         FileLock ignored = writer.lock()) {
-      assertThat(Utils.readSerializable(testFile, TestSerializable.class).getValue(), is("value"));
+      if (SystemUtils.IS_OS_WINDOWS) {
+        assertThrows(
+            IOException.class, () -> Utils.readSerializable(testFile, TestSerializable.class));
+      } else {
+        assertThat(
+            Utils.readSerializable(testFile, TestSerializable.class).getValue(), is("value"));
+      }
     }
     Files.deleteIfExists(testFile);
   }
@@ -347,6 +431,15 @@ public class UtilsTest {
     for (String val : invalidValues) {
       when(request.getHeader(HttpHeader.UPLOAD_CHECKSUM)).thenReturn(val);
       assertThat(Utils.parseUploadChecksumHeader(request), is(nullValue()));
+    }
+  }
+
+  /** The filter must reject this nested type before deserialization executes its callback. */
+  private static class UnexpectedSerializable implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private void readObject(ObjectInputStream input) {
+      throw new AssertionError("An unapproved class must not be deserialized");
     }
   }
 

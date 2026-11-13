@@ -5,13 +5,15 @@
 This is a fork of [tus-java-server](https://github.com/tomdesair/tus-java-server) based on release 1.0.0-3.3, with the following changes:
 
 1. **Atomic upload information writes**: upload information is written to a temporary file that replaces the previous file, so readers never see a truncated file.
-2. **Exclusive file based locks**: a request that locks a lock file which the previous holder just deleted retries on the file at the lock path, and a lock only deletes the lock file it still owns.
+2. **Exclusive file based locks**: a request that locks a lock file which the previous holder just deleted retries on the file at the lock path, and a lock only deletes the lock file it still owns. The lock range leaves the ownership token readable on Windows and remains mutually exclusive with earlier whole-file locks. Filesystem errors retain their original cause.
 3. **Optional data sync**: `withUploadDataSync(false)` skips forcing appended bytes to the storage device after each request. The offset of an upload is aligned with the bytes actually stored whenever it is read.
 4. **Expiration of completed and abandoned uploads**: `withCompletedUploadExpiration(true)` lets `cleanup()` also remove expired completed uploads, and upload directories without readable upload information are removed once nothing in them was modified during the expiration period. Expired uploads are deleted while holding their upload lock.
 5. **Lock wait for application calls**: `withUploadLockWaitTimeout(Duration)` lets `getUploadInfo`, `getUploadedBytes`, `getUploadedFile` and `deleteUpload` wait for a locked upload. Requests that cannot lock their upload are logged as warnings.
 6. **Local file of a completed upload**: `getUploadedFile(String, String)` returns the data file of a completed upload so it can be moved instead of copied.
 7. **Fixed dependency versions**: dependencies use fixed versions instead of version ranges.
 8. **Block writes on append**: request bytes are collected into 256 KiB blocks before each write to the data file, reducing write calls for large uploads.
+
+Upload metadata is deserialized using an explicit class allow-list, including the collection types needed for existing upload metadata. PATCH and creation-with-upload POST requests accept media type parameters and case variations in `Content-Type` while rejecting a different media type.
 
 ## Usage with JitPack
 
@@ -28,7 +30,7 @@ Add to your `pom.xml`:
 <dependency>
     <groupId>com.github.zhaojun1998</groupId>
     <artifactId>tus-java-server</artifactId>
-    <version>TAG_VERSION</version>
+    <version>1.0.0-3.3-zfile.3</version>
 </dependency>
 ```
 
@@ -42,12 +44,12 @@ The Javadoc of this library can be found at https://tus.desair.me/. As of versio
 The tus-java-server library only depends on Jakarta Servlet API 6.0 and some Apache Commons utility libraries. This
 means that (in theory) you can use this library on any modern Java Web Application server like Tomcat, JBoss, Jetty... By default all uploaded data and information is stored on the file system of the application server (and currently this is the only option, see [configuration section](#usage-and-configuration)).
 
-You can add the latest stable version of this library to your application using Maven by adding the following dependency:
+With the JitPack repository configured as shown above, add this fork to your application using:
 
     <dependency>
-      <groupId>me.desair.tus</groupId>
+      <groupId>com.github.zhaojun1998</groupId>
       <artifactId>tus-java-server</artifactId>
-      <version>1.0.0-3.2</version>
+      <version>1.0.0-3.3-zfile.3</version>
     </dependency>
 
 The main entry point of the library is the `me.desair.tus.server.TusFileUploadService.process(jakarta.servlet.http.HttpServletRequest, jakarta.servlet.http.HttpServletResponse)` method. You can call this method inside a `jakarta.servlet.http.HttpServlet`, a `jakarta.servlet.Filter` or any REST API controller of a framework that gives you access to `HttpServletRequest` and `HttpServletResponse` objects. In the following list, you can find some example implementations:

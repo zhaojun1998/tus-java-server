@@ -9,6 +9,7 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Objects;
@@ -41,6 +42,11 @@ public class FileBasedLock implements UploadLock {
   /** Acquisition attempts when the locked file turns out to be unlinked by a previous holder. */
   private static final int MAX_LOCK_ATTEMPTS = 3;
 
+  // Windows byte-range locks also block reads through another handle in the same process.
+  // Lock beyond the token, within the range locked by older versions, so pathname ownership
+  // checks remain readable and mixed-version replicas still exclude each other.
+  private static final long LOCK_POSITION = Long.MAX_VALUE - 1;
+
   private String uploadUri;
   private FileChannel fileChannel = null;
 
@@ -64,13 +70,13 @@ public class FileBasedLock implements UploadLock {
       try {
         channel.truncate(0);
         channel.write(ByteBuffer.wrap(lockToken), 0);
+        if (ownsLockPath()) {
+          fileChannel = channel;
+          return;
+        }
       } catch (IOException e) {
         closeQuietly(channel);
-        throw new IOException("Unable to write the lock file for URI " + getUploadUri(), e);
-      }
-      if (ownsLockPath()) {
-        fileChannel = channel;
-        return;
+        throw new IOException("Unable to verify the lock file for URI " + getUploadUri(), e);
       }
       closeQuietly(channel);
     }
@@ -82,7 +88,7 @@ public class FileBasedLock implements UploadLock {
     try {
       channel = createFileChannel();
       // If the upload is already locked by another process, our lock will be null
-      if (Utils.lockFileExclusively(channel) == null) {
+      if (Utils.lockFileExclusively(channel, LOCK_POSITION, 1L) == null) {
         closeQuietly(channel);
         throw new UploadAlreadyLockedException(alreadyLockedMessage());
       }
@@ -97,11 +103,11 @@ public class FileBasedLock implements UploadLock {
     }
   }
 
-  private boolean ownsLockPath() {
+  private boolean ownsLockPath() throws IOException {
     try {
       return Arrays.equals(Files.readAllBytes(lockPath), lockToken);
-    } catch (IOException e) {
-      // The path was deleted or replaced by another holder
+    } catch (NoSuchFileException e) {
+      // The previous holder unlinked the path after this request opened it.
       return false;
     }
   }

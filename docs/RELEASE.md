@@ -1,6 +1,31 @@
 # Release Process for tus-java-server
 
-This document outlines the steps required to publish a new release of `tus-java-server` to Maven Central.
+## Fork releases on JitPack
+
+The `zhaojun1998/tus-java-server` fork is published from version tags through JitPack,
+under `com.github.zhaojun1998:tus-java-server:<tag>`. Keep the release on its
+`feature/` or `bugfix/` branch, following the existing fork release history.
+
+1. Run the tests and review changed-line coverage. Set `pom.xml` to the release
+   version, and update `CHANGELOG.md` and the README dependency examples.
+2. Review and commit the release changes. Create an annotated tag matching the
+   POM version, then push the branch and tag to the fork's `origin` remote.
+3. Request the tagged POM from
+   `https://jitpack.io/com/github/zhaojun1998/tus-java-server/<tag>/tus-java-server-<tag>.pom`
+   to trigger the build. Check its `build.log` and retrieve the JAR before announcing availability.
+4. Create a GitHub Release for the existing tag using the matching changelog
+   section. Include the JitPack coordinates and any downloadable release artifacts.
+5. Resolve the dependency through JitPack in the consuming application and run
+   its relevant tests before switching it to the released version.
+
+Use the same candidate's existing test results when only release metadata changes.
+Never replace a published tag; fixes after publication receive a new version.
+
+## Upstream Maven Central release reference
+
+The process below and `scripts/release.py` target upstream Maven Central publishing
+under `me.desair.tus` and require upstream publishing credentials. Fork releases
+use the JitPack process above.
 
 ## Prerequisites
 

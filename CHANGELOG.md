@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-3.3-zfile.3]
+
+### Fixes
+- Upload metadata deserialization uses an explicit class allow-list and rejects disallowed nested types before their deserialization callbacks run (backport of upstream #148).
+- PATCH and creation-with-upload POST requests accept Content-Type parameters, surrounding whitespace and case variations while still rejecting a different media type (backport of upstream #126).
+- Upload locks work on Windows by locking a byte range outside the ownership token. Locks remain mutually exclusive with earlier versions and preserve protection against lock-file replacement.
+- Lock ownership checks report filesystem failures instead of treating them as upload contention.
+
 ## [1.0.0-3.3-zfile.2]
 
 ### Changed

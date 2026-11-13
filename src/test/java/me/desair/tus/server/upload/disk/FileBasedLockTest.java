@@ -2,6 +2,9 @@ package me.desair.tus.server.upload.disk;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.anyBoolean;
@@ -15,9 +18,11 @@ import static org.mockito.Mockito.withSettings;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -33,6 +38,54 @@ public class FileBasedLockTest {
   public static void setupDataFolder() throws IOException {
     storagePath = Paths.get("target", "tus", "locks").toAbsolutePath();
     Files.createDirectories(storagePath);
+  }
+
+  @Test
+  public void testOwnershipTokenCanBeReadWhileLockIsHeld() throws Exception {
+    Path path = storagePath.resolve(UUID.randomUUID().toString());
+    try (FileBasedLock lock = new FileBasedLock("/upload/token-readable", path)) {
+      assertNotNull(UUID.fromString(Files.readString(path)));
+      assertThrows(
+          UploadAlreadyLockedException.class,
+          () -> new FileBasedLock("/upload/token-readable", path));
+    }
+    assertFalse(Files.exists(path));
+  }
+
+  @Test
+  public void testWholeFileLocksFromEarlierVersionsRemainExclusive() throws Exception {
+    Path path = storagePath.resolve(UUID.randomUUID().toString());
+    try (FileChannel legacy =
+        FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+      try (FileLock lock = legacy.lock()) {
+        assertThrows(
+            UploadAlreadyLockedException.class, () -> new FileBasedLock("/upload/legacy", path));
+      }
+      try (FileBasedLock lock = new FileBasedLock("/upload/legacy", path)) {
+        assertThrows(OverlappingFileLockException.class, legacy::tryLock);
+      }
+    } finally {
+      Files.deleteIfExists(path);
+    }
+  }
+
+  @Test
+  public void testReleaseClosesChannelWhenOwnershipCannotBeRead() throws Exception {
+    Path path = storagePath.resolve(UUID.randomUUID().toString());
+    FileBasedLock lock = new FileBasedLock("/upload/read-error", path);
+    try (FileChannel witness = FileChannel.open(path, StandardOpenOption.WRITE)) {
+      Files.delete(path);
+      Files.createDirectory(path);
+
+      lock.close();
+
+      assertTrue(Files.isDirectory(path));
+      // This handle still refers to the original file, so it detects a leaked ownership lock.
+      try (FileLock released = witness.tryLock()) {
+        assertNotNull(released);
+      }
+    }
+    Files.delete(path);
   }
 
   @Test

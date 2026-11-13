@@ -26,7 +26,7 @@ public class ContentTypeValidatorTest {
   @Test
   public void validateValid() throws Exception {
     servletRequest.addHeader(
-        HttpHeader.CONTENT_TYPE, ContentTypeValidator.APPLICATION_OFFSET_OCTET_STREAM);
+        HttpHeader.CONTENT_TYPE, " Application/Offset+Octet-Stream ; charset=UTF-8 ");
 
     try {
       validator.validate(HttpMethod.PATCH, servletRequest, null, null);

@@ -11,6 +11,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InvalidClassException;
 import java.io.ObjectOutput;
 import java.io.ObjectOutputStream;
 import java.io.OutputStream;
@@ -19,14 +20,26 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import me.desair.tus.server.HttpHeader;
 import me.desair.tus.server.checksum.ChecksumAlgorithm;
+import me.desair.tus.server.upload.UploadId;
+import me.desair.tus.server.upload.UploadInfo;
+import me.desair.tus.server.upload.UploadType;
 import org.apache.commons.io.serialization.ValidatingObjectInputStream;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Strings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +57,17 @@ public class Utils {
 
   public static String getHeader(HttpServletRequest request, String header) {
     return StringUtils.trimToEmpty(request.getHeader(header));
+  }
+
+  /** Matches the base media type without parameters, ignoring case per RFC 9110 section 8.3. */
+  public static boolean isMediaType(String contentTypeHeader, String expectedMediaType) {
+    if (contentTypeHeader == null || expectedMediaType == null) {
+      return false;
+    }
+    int semicolon = contentTypeHeader.indexOf(';');
+    String baseType =
+        semicolon >= 0 ? contentTypeHeader.substring(0, semicolon) : contentTypeHeader;
+    return Strings.CI.equals(baseType.trim(), expectedMediaType.trim());
   }
 
   public static Long getLongHeader(HttpServletRequest request, String header) {
@@ -86,10 +110,13 @@ public class Utils {
    * <p>No file lock is taken: {@link #writeSerializable(Serializable, Path)} replaces the file
    * atomically, so a reader always sees either the previous or the new complete content.
    *
+   * <p>Only the requested root type and explicitly allowed upload metadata types are deserialized;
+   * arbitrary classes in their packages are not trusted.
+   *
    * @param path The file to read, or null
    * @param clazz The expected type of the serialized object
    * @return The deserialized object, or null if the path is null, the file does not exist or its
-   *     content is truncated or corrupted
+   *     content is truncated, corrupted or contains a disallowed class
    * @throws IOException When the file cannot be read
    */
   public static <T> T readSerializable(Path path, Class<T> clazz) throws IOException {
@@ -97,10 +124,41 @@ public class Utils {
     if (path != null && Files.exists(path)) {
       try (InputStream is = Files.newInputStream(path);
           ValidatingObjectInputStream ois = new ValidatingObjectInputStream(is)) {
-        ois.accept("java.lang.*", "java.util.*", "me.desair.tus.server.*");
+        ois.accept(
+            clazz,
+            UploadInfo.class,
+            UploadId.class,
+            UploadType.class,
+            ChecksumAlgorithm.class,
+            String.class,
+            Long.class,
+            Integer.class,
+            Boolean.class,
+            Number.class,
+            Object.class,
+            Enum.class,
+            Date.class,
+            UUID.class,
+            ArrayList.class,
+            LinkedList.class,
+            TreeMap.class,
+            HashMap.class,
+            HashSet.class,
+            TreeSet.class,
+            String[].class,
+            Object[].class,
+            Arrays.asList().getClass(),
+            Collections.unmodifiableList(new ArrayList<>()).getClass(),
+            // Unmodifiable lists serialize their non-random-access form and collection superclass.
+            Collections.unmodifiableList(new LinkedList<>()).getClass(),
+            Collections.unmodifiableCollection(new ArrayList<>()).getClass(),
+            Collections.emptyList().getClass());
         info = clazz.cast(ois.readObject());
-      } catch (ClassNotFoundException | java.io.EOFException | java.io.StreamCorruptedException e) {
-        // File may be corrupted due to unexpected server shutdown
+      } catch (ClassNotFoundException
+          | InvalidClassException
+          | java.io.EOFException
+          | java.io.StreamCorruptedException e) {
+        // A failed write or a disallowed serialized type makes the metadata unusable.
         log.warn("Unable to read serializable file {}: {}", path, e.getMessage());
         info = null;
       }
@@ -140,11 +198,17 @@ public class Utils {
   }
 
   public static FileLock lockFileExclusively(FileChannel channel) throws IOException {
-    return lockFile(channel, false);
+    return lockFile(channel, 0L, Long.MAX_VALUE, false);
+  }
+
+  /** Locks an exclusive byte range while preserving the standard lock retry policy. */
+  public static FileLock lockFileExclusively(FileChannel channel, long position, long size)
+      throws IOException {
+    return lockFile(channel, position, size, false);
   }
 
   public static FileLock lockFileShared(FileChannel channel) throws IOException {
-    return lockFile(channel, true);
+    return lockFile(channel, 0L, Long.MAX_VALUE, true);
   }
 
   /**
@@ -162,7 +226,8 @@ public class Utils {
     }
   }
 
-  private static FileLock lockFile(FileChannel channel, boolean shared) throws IOException {
+  private static FileLock lockFile(FileChannel channel, long position, long size, boolean shared)
+      throws IOException {
     int i = 0;
     FileLock lock = null;
     do {
@@ -170,7 +235,7 @@ public class Utils {
         sleep(LOCK_FILE_SLEEP_TIME);
       }
 
-      lock = channel.tryLock(0L, Long.MAX_VALUE, shared);
+      lock = channel.tryLock(position, size, shared);
 
       i++;
     } while (lock == null && i < LOCK_FILE_RETRY_COUNT);

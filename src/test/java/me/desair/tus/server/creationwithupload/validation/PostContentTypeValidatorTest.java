@@ -37,7 +37,8 @@ public class PostContentTypeValidatorTest {
   @Test
   public void validateContentTypeOk() throws Exception {
     servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 100L);
-    servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/offset+octet-stream");
+    servletRequest.addHeader(
+        HttpHeader.CONTENT_TYPE, " Application/Offset+Octet-Stream ; charset=UTF-8 ");
 
     try {
       validator.validate(HttpMethod.POST, servletRequest, null, null);
@@ -50,6 +51,13 @@ public class PostContentTypeValidatorTest {
   public void validateContentTypeNotOk() throws Exception {
     servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 100L);
     servletRequest.addHeader(HttpHeader.CONTENT_TYPE, "application/octet-stream");
+
+    validator.validate(HttpMethod.POST, servletRequest, null, null);
+  }
+
+  @Test(expected = InvalidContentTypeException.class)
+  public void validateMissingContentTypeWithBody() throws Exception {
+    servletRequest.addHeader(HttpHeader.CONTENT_LENGTH, 100L);
 
     validator.validate(HttpMethod.POST, servletRequest, null, null);
   }
